@@ -36,11 +36,14 @@ async function main() {
   let mcpServer;
   try {
     mcpServer = await createMcpServer({ config, tokenStore });
-    console.log('MCP server created with 7 tools:');
+    console.log('MCP server created with 13 tools:');
     console.log('  - gmail.authorize, gmail.status');
     console.log('  - gmail.searchMessages, gmail.getMessage');
     console.log('  - gmail.listThreads, gmail.getThread');
     console.log('  - gmail.getAttachmentMetadata');
+    console.log('  - gmail.archiveMessages, gmail.unarchiveMessages');
+    console.log('  - gmail.markAsRead, gmail.markAsUnread');
+    console.log('  - gmail.starMessages, gmail.unstarMessages');
   } catch (error) {
     console.error('Failed to create MCP server:', error);
     await tokenStore.close();
@@ -51,15 +54,29 @@ async function main() {
   const httpServer = await createHttpServer({ config, tokenStore, mcpServer });
 
   // Graceful shutdown handling
+  let isShuttingDown = false;
   const shutdown = async (signal: string) => {
+    if (isShuttingDown) {
+      console.log('Force exit...');
+      process.exit(1);
+    }
+    isShuttingDown = true;
     console.log(`\nReceived ${signal}. Shutting down gracefully...`);
+
+    // Force exit after 5 seconds if graceful shutdown hangs
+    const forceExitTimeout = setTimeout(() => {
+      console.error('Shutdown timed out, forcing exit...');
+      process.exit(1);
+    }, 5000);
+
     try {
       await httpServer.close();
-      await mcpServer.transport.close();
       await tokenStore.close();
+      clearTimeout(forceExitTimeout);
       console.log('Server stopped.');
       process.exit(0);
     } catch (error) {
+      clearTimeout(forceExitTimeout);
       console.error('Error during shutdown:', error);
       process.exit(1);
     }

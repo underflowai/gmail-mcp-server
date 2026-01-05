@@ -9,6 +9,12 @@
  * - gmail.listThreads: List conversation threads
  * - gmail.getThread: Get a thread with all messages
  * - gmail.getAttachmentMetadata: Get attachment info
+ * - gmail.archiveMessages: Archive messages/threads
+ * - gmail.unarchiveMessages: Unarchive messages/threads
+ * - gmail.markAsRead: Mark messages/threads as read
+ * - gmail.markAsUnread: Mark messages/threads as unread
+ * - gmail.starMessages: Star messages/threads
+ * - gmail.unstarMessages: Unstar messages/threads
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -18,7 +24,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Config } from '../config.js';
 import type { TokenStore } from '../store/interface.js';
 import { createGmailClientFactory } from '../gmail/client.js';
-import { NotAuthorizedError, GmailApiError } from '../utils/errors.js';
+import { NotAuthorizedError, GmailApiError, InsufficientScopeError } from '../utils/errors.js';
 
 export interface McpServerDependencies {
   config: Config;
@@ -35,8 +41,13 @@ function getMcpUserId(extra: { authInfo?: unknown }): string {
 function formatError(error: unknown): { content: Array<{ type: 'text'; text: string }>; isError: true } {
   let code = -32603; // Internal error default
   let message = 'An unexpected error occurred';
+  let data: Record<string, unknown> | undefined;
 
-  if (error instanceof NotAuthorizedError) {
+  if (error instanceof InsufficientScopeError) {
+    code = -32001; // NOT_AUTHORIZED
+    message = error.message;
+    data = { requiredScope: error.requiredScope };
+  } else if (error instanceof NotAuthorizedError) {
     code = -32001; // NOT_AUTHORIZED
     message = error.message;
   } else if (error instanceof GmailApiError) {
@@ -50,7 +61,7 @@ function formatError(error: unknown): { content: Array<{ type: 'text'; text: str
     content: [
       {
         type: 'text' as const,
-        text: JSON.stringify({ error: message, code }),
+        text: JSON.stringify({ error: message, code, ...(data && { data }) }),
       },
     ],
     isError: true,
@@ -346,6 +357,176 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
             },
           ],
         };
+      } catch (error) {
+        return formatError(error);
+      }
+    }
+  );
+
+  // Shared input schema for modification tools
+  const modifyInputSchema = {
+    messageIds: z.array(z.string()).optional().describe('Array of message IDs to modify'),
+    threadIds: z.array(z.string()).optional().describe('Array of thread IDs to modify (applies to all messages in thread)'),
+  };
+
+  // Helper to validate at least one ID is provided
+  function validateModifyInput(args: { messageIds?: string[]; threadIds?: string[] }): string | null {
+    if (!args.messageIds?.length && !args.threadIds?.length) {
+      return 'At least one messageId or threadId must be provided';
+    }
+    return null;
+  }
+
+  // Register gmail.archiveMessages tool
+  server.registerTool(
+    'gmail.archiveMessages',
+    {
+      description: 'Archive messages or threads (removes from inbox). Requires gmail.labels scope.',
+      inputSchema: modifyInputSchema,
+    },
+    async (args, extra) => {
+      const mcpUserId = getMcpUserId(extra);
+      const validationError = validateModifyInput(args);
+      if (validationError) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ error: validationError, code: -32602 }) }],
+          isError: true,
+        };
+      }
+
+      try {
+        const result = await gmailClient.archiveMessages(mcpUserId, args.messageIds, args.threadIds);
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+      } catch (error) {
+        return formatError(error);
+      }
+    }
+  );
+
+  // Register gmail.unarchiveMessages tool
+  server.registerTool(
+    'gmail.unarchiveMessages',
+    {
+      description: 'Move messages or threads back to inbox. Requires gmail.labels scope.',
+      inputSchema: modifyInputSchema,
+    },
+    async (args, extra) => {
+      const mcpUserId = getMcpUserId(extra);
+      const validationError = validateModifyInput(args);
+      if (validationError) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ error: validationError, code: -32602 }) }],
+          isError: true,
+        };
+      }
+
+      try {
+        const result = await gmailClient.unarchiveMessages(mcpUserId, args.messageIds, args.threadIds);
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+      } catch (error) {
+        return formatError(error);
+      }
+    }
+  );
+
+  // Register gmail.markAsRead tool
+  server.registerTool(
+    'gmail.markAsRead',
+    {
+      description: 'Mark messages or threads as read. Requires gmail.labels scope.',
+      inputSchema: modifyInputSchema,
+    },
+    async (args, extra) => {
+      const mcpUserId = getMcpUserId(extra);
+      const validationError = validateModifyInput(args);
+      if (validationError) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ error: validationError, code: -32602 }) }],
+          isError: true,
+        };
+      }
+
+      try {
+        const result = await gmailClient.markAsRead(mcpUserId, args.messageIds, args.threadIds);
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+      } catch (error) {
+        return formatError(error);
+      }
+    }
+  );
+
+  // Register gmail.markAsUnread tool
+  server.registerTool(
+    'gmail.markAsUnread',
+    {
+      description: 'Mark messages or threads as unread. Requires gmail.labels scope.',
+      inputSchema: modifyInputSchema,
+    },
+    async (args, extra) => {
+      const mcpUserId = getMcpUserId(extra);
+      const validationError = validateModifyInput(args);
+      if (validationError) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ error: validationError, code: -32602 }) }],
+          isError: true,
+        };
+      }
+
+      try {
+        const result = await gmailClient.markAsUnread(mcpUserId, args.messageIds, args.threadIds);
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+      } catch (error) {
+        return formatError(error);
+      }
+    }
+  );
+
+  // Register gmail.starMessages tool
+  server.registerTool(
+    'gmail.starMessages',
+    {
+      description: 'Add star to messages or threads. Requires gmail.labels scope.',
+      inputSchema: modifyInputSchema,
+    },
+    async (args, extra) => {
+      const mcpUserId = getMcpUserId(extra);
+      const validationError = validateModifyInput(args);
+      if (validationError) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ error: validationError, code: -32602 }) }],
+          isError: true,
+        };
+      }
+
+      try {
+        const result = await gmailClient.starMessages(mcpUserId, args.messageIds, args.threadIds);
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+      } catch (error) {
+        return formatError(error);
+      }
+    }
+  );
+
+  // Register gmail.unstarMessages tool
+  server.registerTool(
+    'gmail.unstarMessages',
+    {
+      description: 'Remove star from messages or threads. Requires gmail.labels scope.',
+      inputSchema: modifyInputSchema,
+    },
+    async (args, extra) => {
+      const mcpUserId = getMcpUserId(extra);
+      const validationError = validateModifyInput(args);
+      if (validationError) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ error: validationError, code: -32602 }) }],
+          isError: true,
+        };
+      }
+
+      try {
+        const result = await gmailClient.unstarMessages(mcpUserId, args.messageIds, args.threadIds);
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
       }

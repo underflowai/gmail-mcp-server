@@ -32,6 +32,16 @@ export class NotAuthorizedError extends McpError {
   }
 }
 
+export class InsufficientScopeError extends McpError {
+  constructor(
+    public readonly requiredScope: string,
+    message = `This operation requires the '${requiredScope}' scope. Please re-authorize with the required scope.`
+  ) {
+    super(ErrorCodes.NOT_AUTHORIZED, message, { requiredScope });
+    this.name = 'InsufficientScopeError';
+  }
+}
+
 export class InvalidArgumentError extends McpError {
   constructor(message: string, data?: Record<string, unknown>) {
     super(ErrorCodes.INVALID_ARGUMENT, message, data);

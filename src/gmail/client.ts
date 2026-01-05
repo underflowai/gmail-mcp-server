@@ -11,7 +11,7 @@
 import { google, gmail_v1 } from 'googleapis';
 import type { TokenStore, GmailCredentials } from '../store/interface.js';
 import { encrypt, decrypt } from '../utils/crypto.js';
-import { NotAuthorizedError, GmailApiError } from '../utils/errors.js';
+import { NotAuthorizedError, GmailApiError, InsufficientScopeError } from '../utils/errors.js';
 
 export interface GmailClientDependencies {
   tokenStore: TokenStore;
@@ -61,6 +61,21 @@ export interface ThreadResult {
   threads: Array<{ id: string; snippet?: string }>;
   nextPageToken?: string;
 }
+
+export interface ModifyResult {
+  id: string;
+  success: boolean;
+  error?: string;
+}
+
+export interface BatchModifyResult {
+  results: ModifyResult[];
+  successCount: number;
+  failureCount: number;
+}
+
+// Gmail label scope required for modifications
+const GMAIL_LABELS_SCOPE = 'https://www.googleapis.com/auth/gmail.labels';
 
 // Token refresh threshold (5 minutes before expiry)
 const REFRESH_THRESHOLD_MS = 5 * 60 * 1000;
@@ -347,6 +362,188 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     }
   }
 
+  /**
+   * Check if user has the required scope.
+   */
+  async function checkScope(mcpUserId: string, requiredScope: string): Promise<void> {
+    const credentials = await getValidCredentials(mcpUserId);
+    const grantedScopes = credentials.scope.split(' ');
+
+    if (!grantedScopes.includes(requiredScope)) {
+      throw new InsufficientScopeError('gmail.labels');
+    }
+  }
+
+  /**
+   * Modify labels on a single message.
+   */
+  async function modifyMessage(
+    mcpUserId: string,
+    messageId: string,
+    addLabels: string[],
+    removeLabels: string[]
+  ): Promise<ModifyResult> {
+    await checkScope(mcpUserId, GMAIL_LABELS_SCOPE);
+    const gmail = await getGmailClient(mcpUserId);
+
+    try {
+      await gmail.users.messages.modify({
+        userId: 'me',
+        id: messageId,
+        requestBody: {
+          addLabelIds: addLabels,
+          removeLabelIds: removeLabels,
+        },
+      });
+      return { id: messageId, success: true };
+    } catch (error: unknown) {
+      const wrapped = wrapGmailError(error);
+      return { id: messageId, success: false, error: wrapped.message };
+    }
+  }
+
+  /**
+   * Modify labels on a thread (affects all messages in thread).
+   */
+  async function modifyThread(
+    mcpUserId: string,
+    threadId: string,
+    addLabels: string[],
+    removeLabels: string[]
+  ): Promise<ModifyResult> {
+    await checkScope(mcpUserId, GMAIL_LABELS_SCOPE);
+    const gmail = await getGmailClient(mcpUserId);
+
+    try {
+      await gmail.users.threads.modify({
+        userId: 'me',
+        id: threadId,
+        requestBody: {
+          addLabelIds: addLabels,
+          removeLabelIds: removeLabels,
+        },
+      });
+      return { id: threadId, success: true };
+    } catch (error: unknown) {
+      const wrapped = wrapGmailError(error);
+      return { id: threadId, success: false, error: wrapped.message };
+    }
+  }
+
+  /**
+   * Batch modify messages and/or threads.
+   */
+  async function batchModify(
+    mcpUserId: string,
+    messageIds: string[] | undefined,
+    threadIds: string[] | undefined,
+    addLabels: string[],
+    removeLabels: string[]
+  ): Promise<BatchModifyResult> {
+    // Check scope once before processing
+    await checkScope(mcpUserId, GMAIL_LABELS_SCOPE);
+
+    const results: ModifyResult[] = [];
+
+    // Process messages
+    if (messageIds) {
+      for (const id of messageIds) {
+        const gmail = await getGmailClient(mcpUserId);
+        try {
+          await gmail.users.messages.modify({
+            userId: 'me',
+            id,
+            requestBody: {
+              addLabelIds: addLabels,
+              removeLabelIds: removeLabels,
+            },
+          });
+          results.push({ id, success: true });
+        } catch (error: unknown) {
+          const wrapped = wrapGmailError(error);
+          results.push({ id, success: false, error: wrapped.message });
+        }
+      }
+    }
+
+    // Process threads
+    if (threadIds) {
+      for (const id of threadIds) {
+        const gmail = await getGmailClient(mcpUserId);
+        try {
+          await gmail.users.threads.modify({
+            userId: 'me',
+            id,
+            requestBody: {
+              addLabelIds: addLabels,
+              removeLabelIds: removeLabels,
+            },
+          });
+          results.push({ id, success: true });
+        } catch (error: unknown) {
+          const wrapped = wrapGmailError(error);
+          results.push({ id, success: false, error: wrapped.message });
+        }
+      }
+    }
+
+    return {
+      results,
+      successCount: results.filter(r => r.success).length,
+      failureCount: results.filter(r => !r.success).length,
+    };
+  }
+
+  // Convenience methods for common operations
+
+  async function archiveMessages(
+    mcpUserId: string,
+    messageIds?: string[],
+    threadIds?: string[]
+  ): Promise<BatchModifyResult> {
+    return batchModify(mcpUserId, messageIds, threadIds, [], ['INBOX']);
+  }
+
+  async function unarchiveMessages(
+    mcpUserId: string,
+    messageIds?: string[],
+    threadIds?: string[]
+  ): Promise<BatchModifyResult> {
+    return batchModify(mcpUserId, messageIds, threadIds, ['INBOX'], []);
+  }
+
+  async function markAsRead(
+    mcpUserId: string,
+    messageIds?: string[],
+    threadIds?: string[]
+  ): Promise<BatchModifyResult> {
+    return batchModify(mcpUserId, messageIds, threadIds, [], ['UNREAD']);
+  }
+
+  async function markAsUnread(
+    mcpUserId: string,
+    messageIds?: string[],
+    threadIds?: string[]
+  ): Promise<BatchModifyResult> {
+    return batchModify(mcpUserId, messageIds, threadIds, ['UNREAD'], []);
+  }
+
+  async function starMessages(
+    mcpUserId: string,
+    messageIds?: string[],
+    threadIds?: string[]
+  ): Promise<BatchModifyResult> {
+    return batchModify(mcpUserId, messageIds, threadIds, ['STARRED'], []);
+  }
+
+  async function unstarMessages(
+    mcpUserId: string,
+    messageIds?: string[],
+    threadIds?: string[]
+  ): Promise<BatchModifyResult> {
+    return batchModify(mcpUserId, messageIds, threadIds, [], ['STARRED']);
+  }
+
   return {
     getValidCredentials,
     searchMessages,
@@ -354,6 +551,17 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     listThreads,
     getThread,
     getAttachmentMetadata,
+    // Modification methods
+    checkScope,
+    modifyMessage,
+    modifyThread,
+    batchModify,
+    archiveMessages,
+    unarchiveMessages,
+    markAsRead,
+    markAsUnread,
+    starMessages,
+    unstarMessages,
   };
 }
 
