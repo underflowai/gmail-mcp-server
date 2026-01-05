@@ -74,6 +74,29 @@ npm start
 npm run dev
 ```
 
+### Docker
+
+The easiest way to deploy anywhere:
+
+```bash
+# Quick start with docker compose
+docker compose up -d
+
+# Or build and run manually
+docker build -t gmail-mcp .
+docker run -d -p 3000:3000 --env-file .env -v ./data:/app/data gmail-mcp
+```
+
+```bash
+# View logs
+docker compose logs -f
+
+# Stop
+docker compose down
+```
+
+The SQLite database persists in `./data/` via volume mount.
+
 The server exposes:
 - `POST /mcp` - MCP protocol endpoint
 - `GET /healthz` - Health check
