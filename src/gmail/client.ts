@@ -9,7 +9,7 @@
  */
 
 import { google, gmail_v1 } from 'googleapis';
-import type { TokenStore, GmailCredentials } from '../store/interface.js';
+import type { TokenStore, GmailCredentials, AccountInfo } from '../store/interface.js';
 import { encrypt, decrypt } from '../utils/crypto.js';
 import { NotAuthorizedError, GmailApiError, InsufficientScopeError } from '../utils/errors.js';
 
@@ -127,11 +127,16 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
 
   /**
    * Get or refresh credentials for a user.
+   * If email is specified, gets that specific account.
+   * If email is omitted, gets the default account.
    */
-  async function getValidCredentials(mcpUserId: string): Promise<GmailCredentials> {
-    const credentials = await tokenStore.getCredentials(mcpUserId);
+  async function getValidCredentials(mcpUserId: string, email?: string): Promise<GmailCredentials> {
+    const credentials = await tokenStore.getCredentials(mcpUserId, email);
 
     if (!credentials) {
+      if (email) {
+        throw new NotAuthorizedError(`Gmail account ${email} not connected. Use gmail.listAccounts to see connected accounts.`);
+      }
       throw new NotAuthorizedError('Gmail not connected. Use gmail.authorize to link your Gmail account.');
     }
 
@@ -174,6 +179,7 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
 
       await tokenStore.updateAccessToken(
         credentials.mcpUserId,
+        credentials.email,
         newTokens.access_token,
         newTokens.expiry_date ?? Date.now() + 3600000,
         newRefreshToken
@@ -188,10 +194,10 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : String(error);
 
-      // Check for revocation
+      // Check for revocation - delete only this specific account
       if (errorMessage.includes('invalid_grant')) {
-        await tokenStore.deleteCredentials(credentials.mcpUserId);
-        throw new NotAuthorizedError('Gmail access revoked. Please re-authorize.');
+        await tokenStore.deleteCredentials(credentials.mcpUserId, credentials.email);
+        throw new NotAuthorizedError(`Gmail access for ${credentials.email} revoked. Please re-authorize.`);
       }
 
       throw new GmailApiError(`Token refresh failed: ${errorMessage}`);
@@ -201,8 +207,8 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
   /**
    * Create an authenticated Gmail client for a user.
    */
-  async function getGmailClient(mcpUserId: string): Promise<gmail_v1.Gmail> {
-    const credentials = await getValidCredentials(mcpUserId);
+  async function getGmailClient(mcpUserId: string, email?: string): Promise<gmail_v1.Gmail> {
+    const credentials = await getValidCredentials(mcpUserId, email);
 
     const oauth2Client = new google.auth.OAuth2(
       googleClientId,
@@ -224,9 +230,10 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     mcpUserId: string,
     query: string,
     maxResults: number = 20,
-    pageToken?: string
+    pageToken?: string,
+    email?: string
   ): Promise<SearchResult> {
-    const gmail = await getGmailClient(mcpUserId);
+    const gmail = await getGmailClient(mcpUserId, email);
 
     try {
       const response = await gmail.users.messages.list({
@@ -288,9 +295,10 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
   async function getMessage(
     mcpUserId: string,
     messageId: string,
-    format: 'metadata' | 'full' = 'metadata'
+    format: 'metadata' | 'full' = 'metadata',
+    email?: string
   ): Promise<MessageMetadata | MessageFull> {
-    const gmail = await getGmailClient(mcpUserId);
+    const gmail = await getGmailClient(mcpUserId, email);
 
     try {
       const response = await gmail.users.messages.get({
@@ -330,9 +338,10 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     mcpUserId: string,
     query?: string,
     maxResults: number = 20,
-    pageToken?: string
+    pageToken?: string,
+    email?: string
   ): Promise<ThreadResult> {
-    const gmail = await getGmailClient(mcpUserId);
+    const gmail = await getGmailClient(mcpUserId, email);
 
     try {
       const response = await gmail.users.threads.list({
@@ -360,9 +369,10 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
   async function getThread(
     mcpUserId: string,
     threadId: string,
-    format: 'metadata' | 'full' = 'metadata'
+    format: 'metadata' | 'full' = 'metadata',
+    email?: string
   ): Promise<Array<MessageMetadata | MessageFull>> {
-    const gmail = await getGmailClient(mcpUserId);
+    const gmail = await getGmailClient(mcpUserId, email);
 
     try {
       const response = await gmail.users.threads.get({
@@ -402,9 +412,10 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
   async function getAttachmentMetadata(
     mcpUserId: string,
     messageId: string,
-    attachmentId: string
+    attachmentId: string,
+    email?: string
   ): Promise<AttachmentMetadata | null> {
-    const gmail = await getGmailClient(mcpUserId);
+    const gmail = await getGmailClient(mcpUserId, email);
 
     try {
       const response = await gmail.users.messages.attachments.get({
@@ -439,8 +450,8 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
   /**
    * Check if user has the required scope.
    */
-  async function checkScope(mcpUserId: string, requiredScope: string): Promise<void> {
-    const credentials = await getValidCredentials(mcpUserId);
+  async function checkScope(mcpUserId: string, requiredScope: string, email?: string): Promise<void> {
+    const credentials = await getValidCredentials(mcpUserId, email);
     const grantedScopes = credentials.scope.split(' ');
 
     if (!grantedScopes.includes(requiredScope)) {
@@ -455,10 +466,11 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     mcpUserId: string,
     messageId: string,
     addLabels: string[],
-    removeLabels: string[]
+    removeLabels: string[],
+    email?: string
   ): Promise<ModifyResult> {
-    await checkScope(mcpUserId, GMAIL_LABELS_SCOPE);
-    const gmail = await getGmailClient(mcpUserId);
+    await checkScope(mcpUserId, GMAIL_LABELS_SCOPE, email);
+    const gmail = await getGmailClient(mcpUserId, email);
 
     try {
       await gmail.users.messages.modify({
@@ -483,10 +495,11 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     mcpUserId: string,
     threadId: string,
     addLabels: string[],
-    removeLabels: string[]
+    removeLabels: string[],
+    email?: string
   ): Promise<ModifyResult> {
-    await checkScope(mcpUserId, GMAIL_LABELS_SCOPE);
-    const gmail = await getGmailClient(mcpUserId);
+    await checkScope(mcpUserId, GMAIL_LABELS_SCOPE, email);
+    const gmail = await getGmailClient(mcpUserId, email);
 
     try {
       await gmail.users.threads.modify({
@@ -512,17 +525,18 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     messageIds: string[] | undefined,
     threadIds: string[] | undefined,
     addLabels: string[],
-    removeLabels: string[]
+    removeLabels: string[],
+    email?: string
   ): Promise<BatchModifyResult> {
     // Check scope once before processing
-    await checkScope(mcpUserId, GMAIL_LABELS_SCOPE);
+    await checkScope(mcpUserId, GMAIL_LABELS_SCOPE, email);
 
     const results: ModifyResult[] = [];
 
     // Process messages
     if (messageIds) {
       for (const id of messageIds) {
-        const gmail = await getGmailClient(mcpUserId);
+        const gmail = await getGmailClient(mcpUserId, email);
         try {
           await gmail.users.messages.modify({
             userId: 'me',
@@ -543,7 +557,7 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     // Process threads
     if (threadIds) {
       for (const id of threadIds) {
-        const gmail = await getGmailClient(mcpUserId);
+        const gmail = await getGmailClient(mcpUserId, email);
         try {
           await gmail.users.threads.modify({
             userId: 'me',
@@ -573,49 +587,55 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
   async function archiveMessages(
     mcpUserId: string,
     messageIds?: string[],
-    threadIds?: string[]
+    threadIds?: string[],
+    email?: string
   ): Promise<BatchModifyResult> {
-    return batchModify(mcpUserId, messageIds, threadIds, [], ['INBOX']);
+    return batchModify(mcpUserId, messageIds, threadIds, [], ['INBOX'], email);
   }
 
   async function unarchiveMessages(
     mcpUserId: string,
     messageIds?: string[],
-    threadIds?: string[]
+    threadIds?: string[],
+    email?: string
   ): Promise<BatchModifyResult> {
-    return batchModify(mcpUserId, messageIds, threadIds, ['INBOX'], []);
+    return batchModify(mcpUserId, messageIds, threadIds, ['INBOX'], [], email);
   }
 
   async function markAsRead(
     mcpUserId: string,
     messageIds?: string[],
-    threadIds?: string[]
+    threadIds?: string[],
+    email?: string
   ): Promise<BatchModifyResult> {
-    return batchModify(mcpUserId, messageIds, threadIds, [], ['UNREAD']);
+    return batchModify(mcpUserId, messageIds, threadIds, [], ['UNREAD'], email);
   }
 
   async function markAsUnread(
     mcpUserId: string,
     messageIds?: string[],
-    threadIds?: string[]
+    threadIds?: string[],
+    email?: string
   ): Promise<BatchModifyResult> {
-    return batchModify(mcpUserId, messageIds, threadIds, ['UNREAD'], []);
+    return batchModify(mcpUserId, messageIds, threadIds, ['UNREAD'], [], email);
   }
 
   async function starMessages(
     mcpUserId: string,
     messageIds?: string[],
-    threadIds?: string[]
+    threadIds?: string[],
+    email?: string
   ): Promise<BatchModifyResult> {
-    return batchModify(mcpUserId, messageIds, threadIds, ['STARRED'], []);
+    return batchModify(mcpUserId, messageIds, threadIds, ['STARRED'], [], email);
   }
 
   async function unstarMessages(
     mcpUserId: string,
     messageIds?: string[],
-    threadIds?: string[]
+    threadIds?: string[],
+    email?: string
   ): Promise<BatchModifyResult> {
-    return batchModify(mcpUserId, messageIds, threadIds, [], ['STARRED']);
+    return batchModify(mcpUserId, messageIds, threadIds, [], ['STARRED'], email);
   }
 
   // ============== LABEL METHODS ==============
@@ -623,8 +643,8 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
   /**
    * Get information about a label including message counts.
    */
-  async function getLabelInfo(mcpUserId: string, labelId: string): Promise<LabelInfo> {
-    const gmail = await getGmailClient(mcpUserId);
+  async function getLabelInfo(mcpUserId: string, labelId: string, email?: string): Promise<LabelInfo> {
+    const gmail = await getGmailClient(mcpUserId, email);
 
     try {
       const response = await gmail.users.labels.get({
@@ -649,8 +669,8 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
   /**
    * List all labels.
    */
-  async function listLabels(mcpUserId: string): Promise<LabelInfo[]> {
-    const gmail = await getGmailClient(mcpUserId);
+  async function listLabels(mcpUserId: string, email?: string): Promise<LabelInfo[]> {
+    const gmail = await getGmailClient(mcpUserId, email);
 
     try {
       const response = await gmail.users.labels.list({
@@ -664,7 +684,7 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
       for (const label of labels) {
         if (label.id) {
           try {
-            const info = await getLabelInfo(mcpUserId, label.id);
+            const info = await getLabelInfo(mcpUserId, label.id, email);
             labelInfos.push(info);
           } catch {
             // Skip labels that fail (e.g., system labels without counts)
@@ -693,9 +713,10 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     mcpUserId: string,
     messageIds: string[] | undefined,
     threadIds: string[] | undefined,
-    labelIds: string[]
+    labelIds: string[],
+    email?: string
   ): Promise<BatchModifyResult> {
-    return batchModify(mcpUserId, messageIds, threadIds, labelIds, []);
+    return batchModify(mcpUserId, messageIds, threadIds, labelIds, [], email);
   }
 
   /**
@@ -705,9 +726,10 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     mcpUserId: string,
     messageIds: string[] | undefined,
     threadIds: string[] | undefined,
-    labelIds: string[]
+    labelIds: string[],
+    email?: string
   ): Promise<BatchModifyResult> {
-    return batchModify(mcpUserId, messageIds, threadIds, [], labelIds);
+    return batchModify(mcpUserId, messageIds, threadIds, [], labelIds, email);
   }
 
   /**
@@ -715,10 +737,11 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
    */
   async function createLabel(
     mcpUserId: string,
-    name: string
+    name: string,
+    email?: string
   ): Promise<{ id: string; name: string }> {
-    await checkScope(mcpUserId, GMAIL_LABELS_SCOPE);
-    const gmail = await getGmailClient(mcpUserId);
+    await checkScope(mcpUserId, GMAIL_LABELS_SCOPE, email);
+    const gmail = await getGmailClient(mcpUserId, email);
 
     try {
       const response = await gmail.users.labels.create({
@@ -753,10 +776,11 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
       cc?: string | string[];
       bcc?: string | string[];
       isHtml?: boolean;
-    }
+    },
+    email?: string
   ): Promise<{ draftId: string; messageId: string }> {
-    await checkScope(mcpUserId, GMAIL_COMPOSE_SCOPE);
-    const gmail = await getGmailClient(mcpUserId);
+    await checkScope(mcpUserId, GMAIL_COMPOSE_SCOPE, email);
+    const gmail = await getGmailClient(mcpUserId, email);
 
     // Build email headers
     const toAddrs = Array.isArray(to) ? to.join(', ') : to;
@@ -766,15 +790,15 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     const contentType = options?.isHtml ? 'text/html' : 'text/plain';
 
     // Build raw email
-    let email = `To: ${toAddrs}\r\n`;
-    if (ccAddrs) email += `Cc: ${ccAddrs}\r\n`;
-    if (bccAddrs) email += `Bcc: ${bccAddrs}\r\n`;
-    email += `Subject: ${subject}\r\n`;
-    email += `Content-Type: ${contentType}; charset=utf-8\r\n\r\n`;
-    email += body;
+    let rawEmail = `To: ${toAddrs}\r\n`;
+    if (ccAddrs) rawEmail += `Cc: ${ccAddrs}\r\n`;
+    if (bccAddrs) rawEmail += `Bcc: ${bccAddrs}\r\n`;
+    rawEmail += `Subject: ${subject}\r\n`;
+    rawEmail += `Content-Type: ${contentType}; charset=utf-8\r\n\r\n`;
+    rawEmail += body;
 
     // Base64url encode
-    const encodedEmail = Buffer.from(email).toString('base64url');
+    const encodedEmail = Buffer.from(rawEmail).toString('base64url');
 
     try {
       const response = await gmail.users.drafts.create({
@@ -801,9 +825,10 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
   async function listDrafts(
     mcpUserId: string,
     maxResults: number = 20,
-    pageToken?: string
+    pageToken?: string,
+    email?: string
   ): Promise<DraftListResult> {
-    const gmail = await getGmailClient(mcpUserId);
+    const gmail = await getGmailClient(mcpUserId, email);
 
     try {
       const response = await gmail.users.drafts.list({
@@ -857,8 +882,8 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
   /**
    * Get a draft with full content.
    */
-  async function getDraft(mcpUserId: string, draftId: string): Promise<DraftContent> {
-    const gmail = await getGmailClient(mcpUserId);
+  async function getDraft(mcpUserId: string, draftId: string, email?: string): Promise<DraftContent> {
+    const gmail = await getGmailClient(mcpUserId, email);
 
     try {
       const response = await gmail.users.drafts.get({
@@ -898,24 +923,25 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
       cc?: string | string[];
       bcc?: string | string[];
       isHtml?: boolean;
-    }
+    },
+    email?: string
   ): Promise<{ draftId: string; messageId: string }> {
-    await checkScope(mcpUserId, GMAIL_COMPOSE_SCOPE);
-    const gmail = await getGmailClient(mcpUserId);
+    await checkScope(mcpUserId, GMAIL_COMPOSE_SCOPE, email);
+    const gmail = await getGmailClient(mcpUserId, email);
 
     const toAddrs = Array.isArray(to) ? to.join(', ') : to;
     const ccAddrs = options?.cc ? (Array.isArray(options.cc) ? options.cc.join(', ') : options.cc) : '';
     const bccAddrs = options?.bcc ? (Array.isArray(options.bcc) ? options.bcc.join(', ') : options.bcc) : '';
     const contentType = options?.isHtml ? 'text/html' : 'text/plain';
 
-    let email = `To: ${toAddrs}\r\n`;
-    if (ccAddrs) email += `Cc: ${ccAddrs}\r\n`;
-    if (bccAddrs) email += `Bcc: ${bccAddrs}\r\n`;
-    email += `Subject: ${subject}\r\n`;
-    email += `Content-Type: ${contentType}; charset=utf-8\r\n\r\n`;
-    email += body;
+    let rawEmail = `To: ${toAddrs}\r\n`;
+    if (ccAddrs) rawEmail += `Cc: ${ccAddrs}\r\n`;
+    if (bccAddrs) rawEmail += `Bcc: ${bccAddrs}\r\n`;
+    rawEmail += `Subject: ${subject}\r\n`;
+    rawEmail += `Content-Type: ${contentType}; charset=utf-8\r\n\r\n`;
+    rawEmail += body;
 
-    const encodedEmail = Buffer.from(email).toString('base64url');
+    const encodedEmail = Buffer.from(rawEmail).toString('base64url');
 
     try {
       const response = await gmail.users.drafts.update({
@@ -940,9 +966,9 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
   /**
    * Delete a draft.
    */
-  async function deleteDraft(mcpUserId: string, draftId: string): Promise<{ success: boolean }> {
-    await checkScope(mcpUserId, GMAIL_COMPOSE_SCOPE);
-    const gmail = await getGmailClient(mcpUserId);
+  async function deleteDraft(mcpUserId: string, draftId: string, email?: string): Promise<{ success: boolean }> {
+    await checkScope(mcpUserId, GMAIL_COMPOSE_SCOPE, email);
+    const gmail = await getGmailClient(mcpUserId, email);
 
     try {
       await gmail.users.drafts.delete({
@@ -954,6 +980,29 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     } catch (error: unknown) {
       throw wrapGmailError(error);
     }
+  }
+
+  // ============== ACCOUNT MANAGEMENT METHODS ==============
+
+  /**
+   * List all connected Gmail accounts for the user.
+   */
+  async function listAccounts(mcpUserId: string): Promise<AccountInfo[]> {
+    return tokenStore.listAccounts(mcpUserId);
+  }
+
+  /**
+   * Set which account is the default for the user.
+   */
+  async function setDefaultAccount(mcpUserId: string, accountEmail: string): Promise<void> {
+    await tokenStore.setDefaultAccount(mcpUserId, accountEmail);
+  }
+
+  /**
+   * Remove a specific Gmail account.
+   */
+  async function removeAccount(mcpUserId: string, accountEmail: string): Promise<void> {
+    await tokenStore.deleteCredentials(mcpUserId, accountEmail);
   }
 
   return {
@@ -986,6 +1035,10 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     getDraft,
     updateDraft,
     deleteDraft,
+    // Account management methods
+    listAccounts,
+    setDefaultAccount,
+    removeAccount,
   };
 }
 

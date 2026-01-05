@@ -212,7 +212,12 @@ export function createGoogleOAuth(deps: GoogleOAuthDependencies) {
       // Encrypt refresh token before storage
       const encryptedRefreshToken = encrypt(tokens.refresh_token, config.tokenEncryptionKey);
 
-      // Store credentials
+      // Check existing accounts to determine if this is first/reconnect
+      const existingAccounts = await tokenStore.listAccounts(storedState.mcpUserId);
+      const isFirstAccount = existingAccounts.length === 0;
+      const isReconnect = existingAccounts.some(a => a.email === profile.data.emailAddress);
+
+      // Store credentials (first account becomes default; reconnects keep current default status)
       await tokenStore.saveCredentials({
         mcpUserId: storedState.mcpUserId,
         googleUserId: profile.data.emailAddress, // Using email as ID since historyId is not unique
@@ -221,7 +226,12 @@ export function createGoogleOAuth(deps: GoogleOAuthDependencies) {
         refreshToken: encryptedRefreshToken,
         expiryDate: tokens.expiry_date ?? Date.now() + 3600000,
         scope: storedState.scopes.map(s => GMAIL_SCOPES[s as GmailScope]).join(' '),
+        isDefault: isFirstAccount, // First account is default; additional accounts are not
       });
+
+      // Determine action text for user feedback
+      const action = isReconnect ? 'reconnected' : 'connected';
+      const accountCount = isFirstAccount ? 1 : existingAccounts.length + (isReconnect ? 0 : 1);
 
       // Send success page
       reply.type('text/html; charset=utf-8').send(`
@@ -232,8 +242,9 @@ export function createGoogleOAuth(deps: GoogleOAuthDependencies) {
           <title>Gmail Connected</title>
         </head>
         <body>
-          <h1>Gmail Connected</h1>
-          <p>Successfully connected as <strong>${profile.data.emailAddress}</strong></p>
+          <h1>Gmail ${action.charAt(0).toUpperCase() + action.slice(1)}</h1>
+          <p>Successfully ${action} as <strong>${profile.data.emailAddress}</strong></p>
+          <p>You now have ${accountCount} Gmail account${accountCount > 1 ? 's' : ''} connected.</p>
           <p>You can now close this window and return to your application.</p>
         </body>
         </html>

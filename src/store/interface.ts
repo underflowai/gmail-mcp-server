@@ -1,5 +1,6 @@
 /**
  * Gmail credentials stored for each MCP user.
+ * Supports multiple Gmail accounts per user.
  */
 export interface GmailCredentials {
   /** MCP user ID (from JWT sub claim) */
@@ -16,10 +17,22 @@ export interface GmailCredentials {
   expiryDate: number;
   /** Granted OAuth scopes (space-separated) */
   scope: string;
+  /** Whether this is the default account for the user */
+  isDefault: boolean;
   /** When credentials were first created */
   createdAt: Date;
   /** When credentials were last updated */
   updatedAt: Date;
+}
+
+/**
+ * Summary info for a connected Gmail account.
+ */
+export interface AccountInfo {
+  email: string;
+  isDefault: boolean;
+  scopes: string[];
+  connectedAt: Date;
 }
 
 /**
@@ -50,24 +63,40 @@ export interface TokenStore {
 
   /**
    * Get Gmail credentials for an MCP user.
+   * If email is specified, returns that specific account.
+   * If email is omitted, returns the default account (or most recently updated as fallback).
    */
-  getCredentials(mcpUserId: string): Promise<GmailCredentials | null>;
+  getCredentials(mcpUserId: string, email?: string): Promise<GmailCredentials | null>;
 
   /**
    * Save or update Gmail credentials for an MCP user.
+   * If this is the first account for the user, it becomes the default.
    */
   saveCredentials(credentials: Omit<GmailCredentials, 'createdAt' | 'updatedAt'>): Promise<void>;
 
   /**
-   * Delete Gmail credentials for an MCP user.
+   * Delete Gmail credentials.
+   * If email is specified, deletes only that account.
+   * If email is omitted, deletes all accounts for the user.
+   * If deleting the default account, promotes the next account to default.
    */
-  deleteCredentials(mcpUserId: string): Promise<void>;
+  deleteCredentials(mcpUserId: string, email?: string): Promise<void>;
 
   /**
-   * Update only the access token and expiry date.
+   * Update only the access token and expiry date for a specific account.
    * Used after token refresh.
    */
-  updateAccessToken(mcpUserId: string, accessToken: string, expiryDate: number, refreshToken?: string): Promise<void>;
+  updateAccessToken(mcpUserId: string, email: string, accessToken: string, expiryDate: number, refreshToken?: string): Promise<void>;
+
+  /**
+   * List all connected Gmail accounts for an MCP user.
+   */
+  listAccounts(mcpUserId: string): Promise<AccountInfo[]>;
+
+  /**
+   * Set which account is the default for an MCP user.
+   */
+  setDefaultAccount(mcpUserId: string, email: string): Promise<void>;
 
   /**
    * Save OAuth state for CSRF protection.

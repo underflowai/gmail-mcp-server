@@ -37,6 +37,9 @@ function getMcpUserId(extra: { authInfo?: unknown }): string {
   return authInfo?.sub ?? 'anonymous';
 }
 
+// Reusable email schema for selecting which Gmail account to use
+const emailSchema = z.string().email().optional().describe('Email address of the Gmail account to use. If not specified, uses the default account.');
+
 // Helper to format error responses
 function formatError(error: unknown): { content: Array<{ type: 'text'; text: string }>; isError: true } {
   let code = -32603; // Internal error default
@@ -113,18 +116,24 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       const mcpUserId = getMcpUserId(extra);
 
       try {
-        const credentials = await tokenStore.getCredentials(mcpUserId);
+        const accounts = await tokenStore.listAccounts(mcpUserId);
 
-        if (credentials) {
+        if (accounts.length > 0) {
+          const defaultAccount = accounts.find(a => a.isDefault) ?? accounts[0]!;
           return {
             content: [
               {
                 type: 'text' as const,
                 text: JSON.stringify({
                   authorized: true,
-                  email: credentials.email,
-                  scopes: credentials.scope.split(' '),
-                  lastAuthorizedAt: credentials.updatedAt.toISOString(),
+                  accountCount: accounts.length,
+                  defaultAccount: defaultAccount.email,
+                  accounts: accounts.map(a => ({
+                    email: a.email,
+                    isDefault: a.isDefault,
+                    scopes: a.scopes,
+                    connectedAt: a.connectedAt.toISOString(),
+                  })),
                 }),
               },
             ],
@@ -137,6 +146,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
               type: 'text' as const,
               text: JSON.stringify({
                 authorized: false,
+                accountCount: 0,
                 message: 'Gmail not connected. Use gmail.authorize to link your Gmail account.',
               }),
             },
@@ -186,6 +196,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
         query: z.string().describe('Gmail search query'),
         maxResults: z.number().int().min(1).max(100).optional().describe('Maximum results (1-100, default 20)'),
         pageToken: z.string().optional().describe('Token for pagination'),
+        email: emailSchema,
       },
     },
     async (args, extra) => {
@@ -196,7 +207,8 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
           mcpUserId,
           args.query,
           args.maxResults ?? 20,
-          args.pageToken
+          args.pageToken,
+          args.email
         );
 
         return {
@@ -221,6 +233,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       inputSchema: {
         messageId: z.string().describe('The message ID'),
         format: z.enum(['metadata', 'full']).optional().describe('Response format (default: metadata)'),
+        email: emailSchema,
       },
     },
     async (args, extra) => {
@@ -230,7 +243,8 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
         const message = await gmailClient.getMessage(
           mcpUserId,
           args.messageId,
-          args.format ?? 'metadata'
+          args.format ?? 'metadata',
+          args.email
         );
 
         return {
@@ -256,6 +270,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
         query: z.string().optional().describe('Optional Gmail search query'),
         maxResults: z.number().int().min(1).max(100).optional().describe('Maximum results (1-100, default 20)'),
         pageToken: z.string().optional().describe('Token for pagination'),
+        email: emailSchema,
       },
     },
     async (args, extra) => {
@@ -266,7 +281,8 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
           mcpUserId,
           args.query,
           args.maxResults ?? 20,
-          args.pageToken
+          args.pageToken,
+          args.email
         );
 
         return {
@@ -291,6 +307,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       inputSchema: {
         threadId: z.string().describe('The thread ID'),
         format: z.enum(['metadata', 'full']).optional().describe('Response format (default: metadata)'),
+        email: emailSchema,
       },
     },
     async (args, extra) => {
@@ -300,7 +317,8 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
         const messages = await gmailClient.getThread(
           mcpUserId,
           args.threadId,
-          args.format ?? 'metadata'
+          args.format ?? 'metadata',
+          args.email
         );
 
         return {
@@ -325,6 +343,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       inputSchema: {
         messageId: z.string().describe('The message ID'),
         attachmentId: z.string().describe('The attachment ID'),
+        email: emailSchema,
       },
     },
     async (args, extra) => {
@@ -334,7 +353,8 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
         const attachment = await gmailClient.getAttachmentMetadata(
           mcpUserId,
           args.messageId,
-          args.attachmentId
+          args.attachmentId,
+          args.email
         );
 
         if (!attachment) {
@@ -367,6 +387,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
   const modifyInputSchema = {
     messageIds: z.array(z.string()).optional().describe('Array of message IDs to modify'),
     threadIds: z.array(z.string()).optional().describe('Array of thread IDs to modify (applies to all messages in thread)'),
+    email: emailSchema,
   };
 
   // Helper to validate at least one ID is provided
@@ -395,7 +416,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       }
 
       try {
-        const result = await gmailClient.archiveMessages(mcpUserId, args.messageIds, args.threadIds);
+        const result = await gmailClient.archiveMessages(mcpUserId, args.messageIds, args.threadIds, args.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
@@ -421,7 +442,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       }
 
       try {
-        const result = await gmailClient.unarchiveMessages(mcpUserId, args.messageIds, args.threadIds);
+        const result = await gmailClient.unarchiveMessages(mcpUserId, args.messageIds, args.threadIds, args.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
@@ -447,7 +468,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       }
 
       try {
-        const result = await gmailClient.markAsRead(mcpUserId, args.messageIds, args.threadIds);
+        const result = await gmailClient.markAsRead(mcpUserId, args.messageIds, args.threadIds, args.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
@@ -473,7 +494,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       }
 
       try {
-        const result = await gmailClient.markAsUnread(mcpUserId, args.messageIds, args.threadIds);
+        const result = await gmailClient.markAsUnread(mcpUserId, args.messageIds, args.threadIds, args.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
@@ -499,7 +520,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       }
 
       try {
-        const result = await gmailClient.starMessages(mcpUserId, args.messageIds, args.threadIds);
+        const result = await gmailClient.starMessages(mcpUserId, args.messageIds, args.threadIds, args.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
@@ -525,7 +546,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       }
 
       try {
-        const result = await gmailClient.unstarMessages(mcpUserId, args.messageIds, args.threadIds);
+        const result = await gmailClient.unstarMessages(mcpUserId, args.messageIds, args.threadIds, args.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
@@ -540,13 +561,14 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       description: 'Get information about a label including message counts. Common labels: INBOX, UNREAD, STARRED, SENT, DRAFT, TRASH, SPAM.',
       inputSchema: {
         labelId: z.string().describe('The label ID (e.g., "INBOX", "UNREAD", "STARRED", or custom label ID)'),
+        email: emailSchema,
       },
     },
     async (args, extra) => {
       const mcpUserId = getMcpUserId(extra);
 
       try {
-        const result = await gmailClient.getLabelInfo(mcpUserId, args.labelId);
+        const result = await gmailClient.getLabelInfo(mcpUserId, args.labelId, args.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
@@ -559,12 +581,15 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
     'gmail.listLabels',
     {
       description: 'List all labels with their message counts',
+      inputSchema: {
+        email: emailSchema,
+      },
     },
-    async (extra) => {
+    async (args, extra) => {
       const mcpUserId = getMcpUserId(extra);
 
       try {
-        const result = await gmailClient.listLabels(mcpUserId);
+        const result = await gmailClient.listLabels(mcpUserId, args?.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify({ labels: result }) }] };
       } catch (error) {
         return formatError(error);
@@ -581,6 +606,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
         messageIds: z.array(z.string()).optional().describe('Array of message IDs to modify'),
         threadIds: z.array(z.string()).optional().describe('Array of thread IDs to modify'),
         labelIds: z.array(z.string()).describe('Array of label IDs to add'),
+        email: emailSchema,
       },
     },
     async (args, extra) => {
@@ -601,7 +627,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       }
 
       try {
-        const result = await gmailClient.addLabels(mcpUserId, args.messageIds, args.threadIds, args.labelIds);
+        const result = await gmailClient.addLabels(mcpUserId, args.messageIds, args.threadIds, args.labelIds, args.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
@@ -618,6 +644,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
         messageIds: z.array(z.string()).optional().describe('Array of message IDs to modify'),
         threadIds: z.array(z.string()).optional().describe('Array of thread IDs to modify'),
         labelIds: z.array(z.string()).describe('Array of label IDs to remove'),
+        email: emailSchema,
       },
     },
     async (args, extra) => {
@@ -638,7 +665,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       }
 
       try {
-        const result = await gmailClient.removeLabels(mcpUserId, args.messageIds, args.threadIds, args.labelIds);
+        const result = await gmailClient.removeLabels(mcpUserId, args.messageIds, args.threadIds, args.labelIds, args.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
@@ -653,13 +680,14 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       description: 'Create a new custom label. Requires gmail.labels scope.',
       inputSchema: {
         name: z.string().describe('Name for the new label'),
+        email: emailSchema,
       },
     },
     async (args, extra) => {
       const mcpUserId = getMcpUserId(extra);
 
       try {
-        const result = await gmailClient.createLabel(mcpUserId, args.name);
+        const result = await gmailClient.createLabel(mcpUserId, args.name, args.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
@@ -679,6 +707,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
         cc: z.union([z.string(), z.array(z.string())]).optional().describe('CC recipient(s)'),
         bcc: z.union([z.string(), z.array(z.string())]).optional().describe('BCC recipient(s)'),
         isHtml: z.boolean().optional().describe('Whether body is HTML (default: false, plain text)'),
+        email: emailSchema,
       },
     },
     async (args, extra) => {
@@ -689,7 +718,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
           cc: args.cc,
           bcc: args.bcc,
           isHtml: args.isHtml,
-        });
+        }, args.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
@@ -705,13 +734,14 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       inputSchema: {
         maxResults: z.number().int().min(1).max(100).optional().describe('Maximum results (1-100, default 20)'),
         pageToken: z.string().optional().describe('Token for pagination'),
+        email: emailSchema,
       },
     },
     async (args, extra) => {
       const mcpUserId = getMcpUserId(extra);
 
       try {
-        const result = await gmailClient.listDrafts(mcpUserId, args.maxResults ?? 20, args.pageToken);
+        const result = await gmailClient.listDrafts(mcpUserId, args.maxResults ?? 20, args.pageToken, args.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
@@ -726,13 +756,14 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       description: 'Get a draft with full content',
       inputSchema: {
         draftId: z.string().describe('The draft ID'),
+        email: emailSchema,
       },
     },
     async (args, extra) => {
       const mcpUserId = getMcpUserId(extra);
 
       try {
-        const result = await gmailClient.getDraft(mcpUserId, args.draftId);
+        const result = await gmailClient.getDraft(mcpUserId, args.draftId, args.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
@@ -753,6 +784,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
         cc: z.union([z.string(), z.array(z.string())]).optional().describe('CC recipient(s)'),
         bcc: z.union([z.string(), z.array(z.string())]).optional().describe('BCC recipient(s)'),
         isHtml: z.boolean().optional().describe('Whether body is HTML (default: false, plain text)'),
+        email: emailSchema,
       },
     },
     async (args, extra) => {
@@ -763,7 +795,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
           cc: args.cc,
           bcc: args.bcc,
           isHtml: args.isHtml,
-        });
+        }, args.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
@@ -778,14 +810,118 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       description: 'Delete a draft. Requires gmail.compose scope.',
       inputSchema: {
         draftId: z.string().describe('The draft ID to delete'),
+        email: emailSchema,
       },
     },
     async (args, extra) => {
       const mcpUserId = getMcpUserId(extra);
 
       try {
-        const result = await gmailClient.deleteDraft(mcpUserId, args.draftId);
+        const result = await gmailClient.deleteDraft(mcpUserId, args.draftId, args.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+      } catch (error) {
+        return formatError(error);
+      }
+    }
+  );
+
+  // ============== ACCOUNT MANAGEMENT TOOLS ==============
+
+  // Register gmail.listAccounts tool
+  server.registerTool(
+    'gmail.listAccounts',
+    {
+      description: 'List all connected Gmail accounts for the current user',
+    },
+    async (extra) => {
+      const mcpUserId = getMcpUserId(extra);
+
+      try {
+        const accounts = await gmailClient.listAccounts(mcpUserId);
+        const defaultAccount = accounts.find(a => a.isDefault)?.email ?? accounts[0]?.email ?? null;
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              accounts: accounts.map(a => ({
+                email: a.email,
+                isDefault: a.isDefault,
+                scopes: a.scopes,
+                connectedAt: a.connectedAt.toISOString(),
+              })),
+              count: accounts.length,
+              defaultAccount,
+            }),
+          }],
+        };
+      } catch (error) {
+        return formatError(error);
+      }
+    }
+  );
+
+  // Register gmail.setDefaultAccount tool
+  server.registerTool(
+    'gmail.setDefaultAccount',
+    {
+      description: 'Set the default Gmail account for operations when no email is specified',
+      inputSchema: {
+        email: z.string().email().describe('Email address of the account to set as default'),
+      },
+    },
+    async (args, extra) => {
+      const mcpUserId = getMcpUserId(extra);
+
+      try {
+        await gmailClient.setDefaultAccount(mcpUserId, args.email);
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: true, defaultAccount: args.email }),
+          }],
+        };
+      } catch (error) {
+        return formatError(error);
+      }
+    }
+  );
+
+  // Register gmail.removeAccount tool
+  server.registerTool(
+    'gmail.removeAccount',
+    {
+      description: 'Disconnect a specific Gmail account',
+      inputSchema: {
+        email: z.string().email().describe('Email address of the account to remove'),
+      },
+    },
+    async (args, extra) => {
+      const mcpUserId = getMcpUserId(extra);
+
+      try {
+        // Check if this is the last account
+        const accounts = await gmailClient.listAccounts(mcpUserId);
+        if (accounts.length <= 1) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                error: 'Cannot remove the last connected account. Use gmail.authorize to connect a different account first.',
+                code: -32602,
+              }),
+            }],
+            isError: true,
+          };
+        }
+
+        await gmailClient.removeAccount(mcpUserId, args.email);
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: true, removedAccount: args.email }),
+          }],
+        };
       } catch (error) {
         return formatError(error);
       }

@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import type { TokenStore, GmailCredentials, OAuthState } from './interface.js';
+import type { TokenStore, GmailCredentials, OAuthState, AccountInfo } from './interface.js';
 
 export class SqliteTokenStore implements TokenStore {
   private db: Database.Database;
@@ -10,20 +10,72 @@ export class SqliteTokenStore implements TokenStore {
   }
 
   async initialize(): Promise<void> {
-    // Create credentials table
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS gmail_credentials (
-        mcp_user_id TEXT PRIMARY KEY,
-        google_user_id TEXT NOT NULL,
-        email TEXT NOT NULL,
-        access_token TEXT NOT NULL,
-        refresh_token TEXT NOT NULL,
-        expiry_date INTEGER NOT NULL,
-        scope TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )
-    `);
+    // Check if migration is needed (old schema has mcp_user_id as sole primary key)
+    const tableExists = this.db.prepare(`
+      SELECT name FROM sqlite_master WHERE type='table' AND name='gmail_credentials'
+    `).get();
+
+    if (tableExists) {
+      // Check if is_default column exists
+      const tableInfo = this.db.prepare('PRAGMA table_info(gmail_credentials)').all() as Array<{ name: string }>;
+      const hasIsDefault = tableInfo.some(col => col.name === 'is_default');
+
+      if (!hasIsDefault) {
+        // Migration needed: old schema -> new schema with composite primary key
+        this.db.exec(`
+          -- Create new table with composite primary key
+          CREATE TABLE gmail_credentials_new (
+            mcp_user_id TEXT NOT NULL,
+            email TEXT NOT NULL,
+            google_user_id TEXT NOT NULL,
+            access_token TEXT NOT NULL,
+            refresh_token TEXT NOT NULL,
+            expiry_date INTEGER NOT NULL,
+            scope TEXT NOT NULL,
+            is_default INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (mcp_user_id, email)
+          );
+
+          -- Migrate existing data (existing accounts become default)
+          INSERT INTO gmail_credentials_new
+            (mcp_user_id, email, google_user_id, access_token, refresh_token,
+             expiry_date, scope, is_default, created_at, updated_at)
+          SELECT mcp_user_id, email, google_user_id, access_token, refresh_token,
+                 expiry_date, scope, 1, created_at, updated_at
+          FROM gmail_credentials;
+
+          -- Drop old table and rename
+          DROP TABLE gmail_credentials;
+          ALTER TABLE gmail_credentials_new RENAME TO gmail_credentials;
+
+          -- Create index for faster default account lookup
+          CREATE INDEX idx_gmail_credentials_default
+          ON gmail_credentials(mcp_user_id, is_default);
+        `);
+      }
+    } else {
+      // Fresh install - create with new schema
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS gmail_credentials (
+          mcp_user_id TEXT NOT NULL,
+          email TEXT NOT NULL,
+          google_user_id TEXT NOT NULL,
+          access_token TEXT NOT NULL,
+          refresh_token TEXT NOT NULL,
+          expiry_date INTEGER NOT NULL,
+          scope TEXT NOT NULL,
+          is_default INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (mcp_user_id, email)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_gmail_credentials_default
+        ON gmail_credentials(mcp_user_id, is_default);
+      `);
+    }
 
     // Create OAuth state table
     this.db.exec(`
@@ -43,12 +95,8 @@ export class SqliteTokenStore implements TokenStore {
     `);
   }
 
-  async getCredentials(mcpUserId: string): Promise<GmailCredentials | null> {
-    const stmt = this.db.prepare(`
-      SELECT * FROM gmail_credentials WHERE mcp_user_id = ?
-    `);
-
-    const row = stmt.get(mcpUserId) as {
+  async getCredentials(mcpUserId: string, email?: string): Promise<GmailCredentials | null> {
+    type CredentialRow = {
       mcp_user_id: string;
       google_user_id: string;
       email: string;
@@ -56,9 +104,37 @@ export class SqliteTokenStore implements TokenStore {
       refresh_token: string;
       expiry_date: number;
       scope: string;
+      is_default: number;
       created_at: string;
       updated_at: string;
-    } | undefined;
+    };
+
+    let row: CredentialRow | undefined;
+
+    if (email) {
+      // Get specific account
+      const stmt = this.db.prepare(`
+        SELECT * FROM gmail_credentials WHERE mcp_user_id = ? AND email = ?
+      `);
+      row = stmt.get(mcpUserId, email) as CredentialRow | undefined;
+    } else {
+      // Get default account
+      const stmt = this.db.prepare(`
+        SELECT * FROM gmail_credentials
+        WHERE mcp_user_id = ? AND is_default = 1
+      `);
+      row = stmt.get(mcpUserId) as CredentialRow | undefined;
+
+      // Fallback: if no explicit default, get the most recently updated
+      if (!row) {
+        const fallbackStmt = this.db.prepare(`
+          SELECT * FROM gmail_credentials
+          WHERE mcp_user_id = ?
+          ORDER BY updated_at DESC LIMIT 1
+        `);
+        row = fallbackStmt.get(mcpUserId) as CredentialRow | undefined;
+      }
+    }
 
     if (!row) {
       return null;
@@ -72,6 +148,7 @@ export class SqliteTokenStore implements TokenStore {
       refreshToken: row.refresh_token,
       expiryDate: row.expiry_date,
       scope: row.scope,
+      isDefault: row.is_default === 1,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),
     };
@@ -80,42 +157,100 @@ export class SqliteTokenStore implements TokenStore {
   async saveCredentials(credentials: Omit<GmailCredentials, 'createdAt' | 'updatedAt'>): Promise<void> {
     const now = new Date().toISOString();
 
-    const stmt = this.db.prepare(`
-      INSERT INTO gmail_credentials
-        (mcp_user_id, google_user_id, email, access_token, refresh_token, expiry_date, scope, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(mcp_user_id) DO UPDATE SET
-        google_user_id = excluded.google_user_id,
-        email = excluded.email,
-        access_token = excluded.access_token,
-        refresh_token = excluded.refresh_token,
-        expiry_date = excluded.expiry_date,
-        scope = excluded.scope,
-        updated_at = excluded.updated_at
-    `);
+    this.db.transaction(() => {
+      // Check if this specific account already exists
+      const existingAccount = this.db.prepare(`
+        SELECT is_default FROM gmail_credentials WHERE mcp_user_id = ? AND email = ?
+      `).get(credentials.mcpUserId, credentials.email) as { is_default: number } | undefined;
 
-    stmt.run(
-      credentials.mcpUserId,
-      credentials.googleUserId,
-      credentials.email,
-      credentials.accessToken,
-      credentials.refreshToken,
-      credentials.expiryDate,
-      credentials.scope,
-      now,
-      now
-    );
+      // Check total account count for this user
+      const existingCount = this.db.prepare(`
+        SELECT COUNT(*) as count FROM gmail_credentials WHERE mcp_user_id = ?
+      `).get(credentials.mcpUserId) as { count: number };
+
+      let isDefault: number;
+      if (existingAccount) {
+        // Reconnecting: preserve existing default status unless explicitly setting as default
+        isDefault = credentials.isDefault ? 1 : existingAccount.is_default;
+      } else {
+        // New account: first account is always default; otherwise use provided value
+        isDefault = existingCount.count === 0 ? 1 : (credentials.isDefault ? 1 : 0);
+      }
+
+      // If setting as default, unset other defaults first
+      if (isDefault === 1 && existingCount.count > 0) {
+        this.db.prepare(`
+          UPDATE gmail_credentials SET is_default = 0 WHERE mcp_user_id = ?
+        `).run(credentials.mcpUserId);
+      }
+
+      const stmt = this.db.prepare(`
+        INSERT INTO gmail_credentials
+          (mcp_user_id, email, google_user_id, access_token, refresh_token,
+           expiry_date, scope, is_default, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(mcp_user_id, email) DO UPDATE SET
+          google_user_id = excluded.google_user_id,
+          access_token = excluded.access_token,
+          refresh_token = excluded.refresh_token,
+          expiry_date = excluded.expiry_date,
+          scope = excluded.scope,
+          is_default = excluded.is_default,
+          updated_at = excluded.updated_at
+      `);
+
+      stmt.run(
+        credentials.mcpUserId,
+        credentials.email,
+        credentials.googleUserId,
+        credentials.accessToken,
+        credentials.refreshToken,
+        credentials.expiryDate,
+        credentials.scope,
+        isDefault,
+        now,
+        now
+      );
+    })();
   }
 
-  async deleteCredentials(mcpUserId: string): Promise<void> {
-    const stmt = this.db.prepare(`
-      DELETE FROM gmail_credentials WHERE mcp_user_id = ?
-    `);
-    stmt.run(mcpUserId);
+  async deleteCredentials(mcpUserId: string, email?: string): Promise<void> {
+    if (email) {
+      // Delete specific account
+      this.db.transaction(() => {
+        const wasDefault = this.db.prepare(`
+          SELECT is_default FROM gmail_credentials WHERE mcp_user_id = ? AND email = ?
+        `).get(mcpUserId, email) as { is_default: number } | undefined;
+
+        this.db.prepare(`
+          DELETE FROM gmail_credentials WHERE mcp_user_id = ? AND email = ?
+        `).run(mcpUserId, email);
+
+        // If deleted account was default, promote next account (oldest by created_at)
+        if (wasDefault?.is_default === 1) {
+          this.db.prepare(`
+            UPDATE gmail_credentials
+            SET is_default = 1, updated_at = ?
+            WHERE mcp_user_id = ? AND email = (
+              SELECT email FROM gmail_credentials
+              WHERE mcp_user_id = ?
+              ORDER BY created_at ASC LIMIT 1
+            )
+          `).run(new Date().toISOString(), mcpUserId, mcpUserId);
+        }
+      })();
+    } else {
+      // Delete all accounts for user
+      const stmt = this.db.prepare(`
+        DELETE FROM gmail_credentials WHERE mcp_user_id = ?
+      `);
+      stmt.run(mcpUserId);
+    }
   }
 
   async updateAccessToken(
     mcpUserId: string,
+    email: string,
     accessToken: string,
     expiryDate: number,
     refreshToken?: string
@@ -126,17 +261,64 @@ export class SqliteTokenStore implements TokenStore {
       const stmt = this.db.prepare(`
         UPDATE gmail_credentials
         SET access_token = ?, expiry_date = ?, refresh_token = ?, updated_at = ?
-        WHERE mcp_user_id = ?
+        WHERE mcp_user_id = ? AND email = ?
       `);
-      stmt.run(accessToken, expiryDate, refreshToken, now, mcpUserId);
+      stmt.run(accessToken, expiryDate, refreshToken, now, mcpUserId, email);
     } else {
       const stmt = this.db.prepare(`
         UPDATE gmail_credentials
         SET access_token = ?, expiry_date = ?, updated_at = ?
-        WHERE mcp_user_id = ?
+        WHERE mcp_user_id = ? AND email = ?
       `);
-      stmt.run(accessToken, expiryDate, now, mcpUserId);
+      stmt.run(accessToken, expiryDate, now, mcpUserId, email);
     }
+  }
+
+  async listAccounts(mcpUserId: string): Promise<AccountInfo[]> {
+    const stmt = this.db.prepare(`
+      SELECT email, is_default, scope, created_at
+      FROM gmail_credentials
+      WHERE mcp_user_id = ?
+      ORDER BY is_default DESC, created_at ASC
+    `);
+
+    const rows = stmt.all(mcpUserId) as Array<{
+      email: string;
+      is_default: number;
+      scope: string;
+      created_at: string;
+    }>;
+
+    return rows.map(row => ({
+      email: row.email,
+      isDefault: row.is_default === 1,
+      scopes: row.scope.split(' '),
+      connectedAt: new Date(row.created_at),
+    }));
+  }
+
+  async setDefaultAccount(mcpUserId: string, email: string): Promise<void> {
+    this.db.transaction(() => {
+      // Verify the account exists
+      const exists = this.db.prepare(`
+        SELECT 1 FROM gmail_credentials WHERE mcp_user_id = ? AND email = ?
+      `).get(mcpUserId, email);
+
+      if (!exists) {
+        throw new Error(`Account ${email} not found for user`);
+      }
+
+      // Unset all defaults for this user
+      this.db.prepare(`
+        UPDATE gmail_credentials SET is_default = 0 WHERE mcp_user_id = ?
+      `).run(mcpUserId);
+
+      // Set new default
+      this.db.prepare(`
+        UPDATE gmail_credentials SET is_default = 1, updated_at = ?
+        WHERE mcp_user_id = ? AND email = ?
+      `).run(new Date().toISOString(), mcpUserId, email);
+    })();
   }
 
   async saveOAuthState(state: OAuthState): Promise<void> {

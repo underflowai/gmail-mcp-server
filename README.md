@@ -4,7 +4,8 @@ An MCP (Model Context Protocol) server that exposes Gmail tools via Streamable H
 
 ## Features
 
-- **23 Gmail tools** for comprehensive inbox management
+- **26 Gmail tools** for comprehensive inbox management
+- **Multi-inbox support**: Connect multiple Gmail accounts per user
 - **Two-layer OAuth**: MCP-level JWT authentication + Google OAuth for Gmail access
 - **Secure token storage**: SQLite with AES-256-GCM encryption for refresh tokens
 - **Streamable HTTP transport**: Stateless mode for easy deployment
@@ -82,11 +83,16 @@ The server exposes:
 
 ## Available Tools
 
-### Authentication
+All tools accept an optional `email` parameter to target a specific connected account. If omitted, the default account is used.
+
+### Authentication & Accounts
 | Tool | Description |
 |------|-------------|
-| `gmail.status` | Check if Gmail is connected |
+| `gmail.status` | Check connection status and list connected accounts |
 | `gmail.authorize` | Initiate OAuth flow to connect Gmail |
+| `gmail.listAccounts` | List all connected Gmail accounts |
+| `gmail.setDefaultAccount` | Set which account is used by default |
+| `gmail.removeAccount` | Disconnect a Gmail account |
 
 ### Reading Messages
 | Tool | Description |
@@ -142,6 +148,40 @@ Example:
 }
 ```
 
+## Multi-Inbox Support
+
+Users can connect multiple Gmail accounts. The first connected account becomes the default.
+
+### Connecting Additional Accounts
+
+Call `gmail.authorize` again to connect another Gmail account. Each account can have different scopes.
+
+### Targeting Specific Accounts
+
+All tools accept an optional `email` parameter:
+
+```json
+{
+  "query": "is:unread",
+  "email": "work@example.com"
+}
+```
+
+If `email` is omitted, the default account is used.
+
+### Managing Accounts
+
+```json
+// List all connected accounts
+{ "tool": "gmail.listAccounts" }
+
+// Change default account
+{ "tool": "gmail.setDefaultAccount", "email": "work@example.com" }
+
+// Disconnect an account
+{ "tool": "gmail.removeAccount", "email": "old@example.com" }
+```
+
 ## Architecture
 
 ```
@@ -159,7 +199,7 @@ MCP Client → Fastify HTTP (/mcp) → MCP Server → Gmail Client → Google AP
 - **`src/gmail/client.ts`** - Gmail API wrapper with token refresh
 - **`src/auth/mcpOAuth.ts`** - MCP-level JWT authentication
 - **`src/auth/googleOAuth.ts`** - Google OAuth flow with PKCE
-- **`src/store/sqlite.ts`** - SQLite token storage with encryption
+- **`src/store/sqlite.ts`** - SQLite token storage with encryption (composite key for multi-account)
 
 ## Development
 
@@ -186,8 +226,8 @@ The server uses JSON-RPC error codes:
 
 | Code | Type | Description |
 |------|------|-------------|
-| `-32001` | `NOT_AUTHORIZED` | User not authenticated or token revoked |
-| `-32602` | `INVALID_ARGUMENT` | Invalid input parameters |
+| `-32001` | `NOT_AUTHORIZED` | User not authenticated, token revoked, or insufficient scope |
+| `-32602` | `INVALID_ARGUMENT` | Invalid input parameters or account not found |
 | `-32000` | `GMAIL_API_ERROR` | Gmail API error or rate limit |
 
 When `invalid_grant` is returned from Google (token revoked), stored tokens are cleared and the user must re-authorize.
