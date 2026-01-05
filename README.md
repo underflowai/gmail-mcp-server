@@ -305,9 +305,42 @@ Install custom Claude Code subagents for enhanced Gmail workflows:
 npm run bin:cc-install-subagents
 ```
 
-This installs the **inbox-explorer** agent, which analyzes and summarizes Gmail inboxes. Use it by asking Claude Code:
+This installs **12 specialized Gmail agents** that provide intelligent email management capabilities.
 
-> "Explore my Gmail inbox and tell me what needs attention"
+### Available Subagents
+
+| Agent | Description | Example Prompt |
+|-------|-------------|----------------|
+| **gmail-inbox-explorer** | Analyzes inbox structure, labels, and activity | "Explore my Gmail inbox" |
+| **gmail-email-triage** | Prioritizes unread emails by urgency | "Help me triage my inbox" |
+| **gmail-email-summarizer** | Summarizes emails matching search criteria | "Summarize emails from John this week" |
+| **gmail-draft-composer** | Helps write professional email drafts | "Help me write an email to my boss" |
+| **gmail-inbox-cleanup** | Archives old emails and reduces clutter | "Clean up my inbox" |
+| **gmail-follow-up-finder** | Finds emails needing response or follow-up | "What emails need follow-up?" |
+| **gmail-action-item-extractor** | Extracts tasks and deadlines from emails | "What action items are in my emails?" |
+| **gmail-project-email-collector** | Gathers all emails about a project/topic | "Find all emails about the redesign project" |
+| **gmail-newsletter-manager** | Manages newsletter subscriptions | "What newsletters am I subscribed to?" |
+| **gmail-contact-insights** | Analyzes communication with a contact | "Show my email history with sarah@company.com" |
+| **gmail-multi-inbox-dashboard** | Unified view across multiple accounts | "Overview of all my email accounts" |
+| **gmail-email-reply-drafter** | Drafts contextual replies to threads | "Help me reply to the project deadline email" |
+
+### Example Usage
+
+Ask Claude Code naturally and it will automatically use the appropriate agent:
+
+```
+"I have 50 unread emails, what needs my attention first?"
+→ Uses gmail-email-triage
+
+"Summarize the email thread about Q4 planning"
+→ Uses gmail-email-summarizer
+
+"Help me write a follow-up email to the client"
+→ Uses gmail-draft-composer
+
+"What tasks are buried in my recent emails?"
+→ Uses gmail-action-item-extractor
+```
 
 ## Error Handling
 
