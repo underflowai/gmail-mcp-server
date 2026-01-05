@@ -77,7 +77,7 @@ cp .env.example .env
 ./scripts/generate-secrets.sh
 
 # Or use npm
-npm run generate-secrets
+npm run bin:generate-secrets
 ```
 
 ## Running the Server
