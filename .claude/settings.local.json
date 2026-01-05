@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(npm run build:*)",
+      "mcp__gmail-mcp__gmail_status",
+      "mcp__gmail-mcp__gmail_authorize",
+      "mcp__gmail-mcp__gmail_listAccounts",
+      "mcp__gmail-mcp__gmail_searchMessages",
+      "mcp__gmail-mcp__gmail_getMessage",
+      "mcp__gmail-mcp__gmail_listThreads",
+      "mcp__gmail-mcp__gmail_getThread",
+      "mcp__gmail-mcp__gmail_getAttachmentMetadata",
+      "mcp__gmail-mcp__gmail_getLabelInfo",
+      "mcp__gmail-mcp__gmail_listLabels",
+      "mcp__gmail-mcp__gmail_listDrafts",
+      "mcp__gmail-mcp__gmail_getDraft"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "claude-flow",
+    "ruv-swarm"
+  ],
+  "disabledMcpjsonServers": [
+    "claude-flow",
+    "ruv-swarm"
+  ]
+}

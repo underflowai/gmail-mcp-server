@@ -34,3 +34,6 @@ logs/
 # Temporary files
 tmp/
 temp/
+
+# Override global ignore for Claude settings
+!.claude/settings.local.json
