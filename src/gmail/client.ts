@@ -114,6 +114,7 @@ export interface DraftListResult {
 
 // Gmail scopes
 const GMAIL_LABELS_SCOPE = 'https://www.googleapis.com/auth/gmail.labels';
+const GMAIL_MODIFY_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
 const GMAIL_COMPOSE_SCOPE = 'https://www.googleapis.com/auth/gmail.compose';
 
 // Token refresh threshold (5 minutes before expiry)
@@ -529,7 +530,8 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     email?: string
   ): Promise<BatchModifyResult> {
     // Check scope once before processing
-    await checkScope(mcpUserId, GMAIL_LABELS_SCOPE, email);
+    // Note: gmail.modify scope is required to add/remove labels on messages
+    await checkScope(mcpUserId, GMAIL_MODIFY_SCOPE, email);
 
     const results: ModifyResult[] = [];
 

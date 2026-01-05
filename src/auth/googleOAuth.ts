@@ -20,6 +20,7 @@ import { encrypt } from '../utils/crypto.js';
 export const GMAIL_SCOPES = {
   'gmail.readonly': 'https://www.googleapis.com/auth/gmail.readonly',
   'gmail.labels': 'https://www.googleapis.com/auth/gmail.labels',
+  'gmail.modify': 'https://www.googleapis.com/auth/gmail.modify',
   'gmail.compose': 'https://www.googleapis.com/auth/gmail.compose',
 } as const;
 

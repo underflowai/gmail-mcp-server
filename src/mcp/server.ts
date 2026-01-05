@@ -164,7 +164,7 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
     {
       description: 'Initiates the OAuth consent flow to connect Gmail',
       inputSchema: {
-        scopes: z.array(z.enum(['gmail.readonly', 'gmail.labels', 'gmail.compose'])).optional(),
+        scopes: z.array(z.enum(['gmail.readonly', 'gmail.labels', 'gmail.modify', 'gmail.compose'])).optional(),
       },
     },
     async (args, extra) => {

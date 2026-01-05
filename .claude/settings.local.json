@@ -18,7 +18,8 @@
       "Bash(chmod:*)",
       "Bash(npm run bin:claude-code-setup:*)",
       "Bash(npm run bin:cc-install-subagents:*)",
-      "Bash(npm run bin:cc-install-mcp-server:*)"
+      "Bash(npm run bin:cc-install-mcp-server:*)",
+      "mcp__gmail-mcp__gmail_archiveMessages"
     ]
   },
   "enableAllProjectMcpServers": true,
