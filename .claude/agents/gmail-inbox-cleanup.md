@@ -50,7 +50,9 @@ Analyze patterns to suggest labels:
 
 ### Phase 4: Execute Cleanup
 With user approval:
-1. Use `gmail.archiveMessages` to archive identified emails
+1. Use `gmail.archiveMessages` with **threadIds** to archive entire conversations (preferred)
+   - By default, archiving a messageId will archive its entire thread
+   - This ensures conversations leave the inbox completely
 2. Use `gmail.createLabel` for new organizational labels
 3. Use `gmail.addLabels` to categorize before archiving
 4. Use `gmail.markAsRead` for notification-type emails
@@ -142,10 +144,11 @@ Tell me:
 
 1. **Never archive unread**: Unread emails need attention first
 2. **Preserve starred**: Stars indicate importance to user
-3. **Batch operations**: Process in groups for efficiency
-4. **Confirm large actions**: Get approval before archiving 50+ emails
-5. **Create before archive**: Set up labels before bulk archival
-6. **Report results**: Always show what was archived
+3. **Prefer threadIds**: When archiving, use threadIds to ensure entire conversations are archived
+4. **Batch operations**: Process in groups for efficiency
+5. **Confirm large actions**: Get approval before archiving 50+ emails
+6. **Create before archive**: Set up labels before bulk archival
+7. **Report results**: Always show what was archived
 
 ## Safety Measures
 

@@ -45,7 +45,7 @@ Server runs at `http://localhost:3000`. Connect your Gmail at `/oauth/start`.
    - Go to APIs & Services → OAuth consent screen
    - Choose "External" user type
    - Fill in app name and support email
-   - Add scopes: `gmail.readonly`, `gmail.labels`, `gmail.compose`
+   - Add scopes: `gmail.readonly`, `gmail.labels`, `gmail.modify`, `gmail.compose`
    - Add your email as a test user
 
 4. **Create OAuth credentials**
@@ -180,12 +180,14 @@ All tools accept an optional `email` parameter to target a specific connected ac
 ### Message Organization
 | Tool | Description | Scope Required |
 |------|-------------|----------------|
-| `gmail.archiveMessages` | Archive messages/threads | `gmail.labels` |
-| `gmail.unarchiveMessages` | Move back to inbox | `gmail.labels` |
+| `gmail.archiveMessages` | Archive messages/threads (thread-aware by default) | `gmail.modify` |
+| `gmail.unarchiveMessages` | Move back to inbox (thread-aware by default) | `gmail.modify` |
 | `gmail.markAsRead` | Mark as read | `gmail.labels` |
 | `gmail.markAsUnread` | Mark as unread | `gmail.labels` |
 | `gmail.starMessages` | Add star | `gmail.labels` |
 | `gmail.unstarMessages` | Remove star | `gmail.labels` |
+
+> **Thread-Aware Archiving**: By default, `archiveMessages` and `unarchiveMessages` will archive the entire thread when given a `messageId`. This ensures conversations leave your inbox. Set `archiveEntireThread: false` to archive individual messages only.
 
 ### Drafts
 | Tool | Description | Scope Required |
@@ -203,13 +205,14 @@ Request scopes when calling `gmail.authorize`:
 | Scope | Permissions |
 |-------|-------------|
 | `gmail.readonly` | Read messages, threads, labels |
-| `gmail.labels` | Modify labels, archive, star, mark read/unread |
+| `gmail.labels` | Manage labels, star, mark read/unread |
+| `gmail.modify` | Archive/unarchive messages and threads |
 | `gmail.compose` | Create, update, and delete drafts |
 
 Example:
 ```json
 {
-  "scopes": ["gmail.readonly", "gmail.labels", "gmail.compose"]
+  "scopes": ["gmail.readonly", "gmail.modify", "gmail.compose"]
 }
 ```
 

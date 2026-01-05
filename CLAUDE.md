@@ -42,7 +42,7 @@ MCP Client → Fastify HTTP (/mcp) → MCP Server → Gmail Client → Google AP
 ### Authentication Layers
 
 1. **MCP-level**: JWT access tokens (HS256, 1hr lifetime) with `sub` claim as user identity
-2. **Gmail-level**: Google OAuth tokens stored per MCP user; supports readonly, labels, compose scopes
+2. **Gmail-level**: Google OAuth tokens stored per MCP user; supports readonly, labels, modify, compose scopes
 
 ### Multi-Account Support
 
@@ -75,3 +75,28 @@ See `.env.example`. Key variables: `PORT`, `BASE_URL`, `GOOGLE_CLIENT_ID`, `GOOG
 ### Token Refresh Behavior
 
 Gmail client proactively refreshes access tokens 5 minutes before expiry. On `invalid_grant` (revocation), tokens are cleared and user must re-authorize. Transient errors retry with exponential backoff (max 3 attempts).
+
+### Thread vs Message Semantics
+
+Gmail's inbox is **thread-based**. Important implications:
+
+1. **Inbox visibility**: A thread appears in inbox if ANY message has the `INBOX` label
+2. **Archive behavior**: To remove a thread from inbox, ALL messages must be archived
+3. **API operations**:
+   - `messageIds` - operates on individual messages
+   - `threadIds` - operates on all messages in the thread
+
+**Recommendation for archive operations**: Use `threadIds` or rely on the default `archiveEntireThread=true` behavior.
+
+### Archive/Unarchive Parameters
+
+| Tool | Parameter | Default | Behavior |
+|------|-----------|---------|----------|
+| `archiveMessages` | `archiveEntireThread` | `true` | Converts messageIds to threadIds automatically |
+| `unarchiveMessages` | `archiveEntireThread` | `true` | Converts messageIds to threadIds automatically |
+
+Set `archiveEntireThread=false` to archive only specific messages (thread may remain in inbox).
+
+### Search Results
+
+`searchMessages` returns `threadMessageCount` for each result, indicating how many messages are in that thread. This helps identify multi-message conversations for thread-aware operations.

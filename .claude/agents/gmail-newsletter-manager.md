@@ -45,7 +45,7 @@ Group subscriptions by:
 Based on user preferences:
 1. Use `gmail.createLabel` for subscription categories
 2. Use `gmail.addLabels` to organize
-3. Use `gmail.archiveMessages` for bulk cleanup
+3. Use `gmail.archiveMessages` for bulk cleanup (archives entire threads by default)
 4. Use `gmail.markAsRead` for notification-type emails
 
 ## Output Format

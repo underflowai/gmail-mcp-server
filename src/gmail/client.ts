@@ -55,6 +55,7 @@ export interface AttachmentMetadata {
 export interface SearchResultMessage {
   id: string;
   threadId: string;
+  threadMessageCount?: number;
   snippet?: string;
   subject?: string;
   from?: string;
@@ -246,10 +247,14 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
 
       const messageList = response.data.messages ?? [];
 
+      // Collect unique thread IDs for batch fetching thread info
+      const threadIds = new Set<string>();
+
       // Fetch metadata for each message
       const messages: SearchResultMessage[] = [];
       for (const m of messageList) {
         if (!m.id || !m.threadId) continue;
+        threadIds.add(m.threadId);
 
         try {
           const msgResponse = await gmail.users.messages.get({
@@ -279,6 +284,26 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
             threadId: m.threadId,
           });
         }
+      }
+
+      // Fetch thread info to get message counts
+      const threadInfoMap = new Map<string, number>();
+      for (const threadId of threadIds) {
+        try {
+          const threadResponse = await gmail.users.threads.get({
+            userId: 'me',
+            id: threadId,
+            format: 'minimal',
+          });
+          threadInfoMap.set(threadId, threadResponse.data.messages?.length ?? 1);
+        } catch {
+          threadInfoMap.set(threadId, 1);
+        }
+      }
+
+      // Attach thread message counts to results
+      for (const msg of messages) {
+        msg.threadMessageCount = threadInfoMap.get(msg.threadId) ?? 1;
       }
 
       return {
@@ -449,6 +474,41 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
   }
 
   /**
+   * Get threadIds for a list of messageIds.
+   * Used by archive operations to convert message-level to thread-level operations.
+   */
+  async function getThreadIdsForMessages(
+    mcpUserId: string,
+    messageIds: string[],
+    email?: string
+  ): Promise<string[]> {
+    const gmail = await getGmailClient(mcpUserId, email);
+    const threadIds: Set<string> = new Set();
+
+    for (const messageId of messageIds) {
+      try {
+        const response = await gmail.users.messages.get({
+          userId: 'me',
+          id: messageId,
+          format: 'minimal',
+          fields: 'threadId',
+        });
+        if (response.data.threadId) {
+          threadIds.add(response.data.threadId);
+        }
+      } catch (error) {
+        // If message not found, skip it (it may have been deleted)
+        const gmailError = error as { code?: number };
+        if (gmailError.code !== 404) {
+          throw wrapGmailError(error);
+        }
+      }
+    }
+
+    return Array.from(threadIds);
+  }
+
+  /**
    * Check if user has the required scope.
    */
   async function checkScope(mcpUserId: string, requiredScope: string, email?: string): Promise<void> {
@@ -519,7 +579,14 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
   }
 
   /**
-   * Batch modify messages and/or threads.
+   * Batch modify labels on messages and/or threads.
+   *
+   * Thread vs Message semantics:
+   * - messageIds: Modifies only the specified messages
+   * - threadIds: Modifies ALL messages in the specified threads
+   *
+   * For inbox operations (archive/unarchive), prefer threadIds because Gmail's
+   * inbox view is thread-based. A thread appears in inbox if ANY message has the INBOX label.
    */
   async function batchModify(
     mcpUserId: string,
@@ -586,6 +653,13 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
 
   // Convenience methods for common operations
 
+  /**
+   * Archive messages and/or threads (remove INBOX label).
+   *
+   * IMPORTANT: Gmail's inbox is thread-based. A thread remains in the inbox if ANY
+   * message in that thread has the INBOX label. For reliable archiving, prefer using
+   * threadIds or use the MCP tool with archiveEntireThread=true (default).
+   */
   async function archiveMessages(
     mcpUserId: string,
     messageIds?: string[],
@@ -595,6 +669,12 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     return batchModify(mcpUserId, messageIds, threadIds, [], ['INBOX'], email);
   }
 
+  /**
+   * Unarchive messages and/or threads (add INBOX label).
+   *
+   * For consistency, prefer using threadIds or use the MCP tool with
+   * archiveEntireThread=true (default) to restore entire conversations.
+   */
   async function unarchiveMessages(
     mcpUserId: string,
     messageIds?: string[],
@@ -1014,6 +1094,7 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     listThreads,
     getThread,
     getAttachmentMetadata,
+    getThreadIdsForMessages,
     // Modification methods
     checkScope,
     modifyMessage,

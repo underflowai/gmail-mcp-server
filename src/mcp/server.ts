@@ -191,7 +191,10 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
   server.registerTool(
     'gmail.searchMessages',
     {
-      description: 'Search messages using Gmail query syntax (e.g., "from:john subject:meeting")',
+      description:
+        'Search messages using Gmail query syntax (e.g., "from:john subject:meeting"). ' +
+        'Results include threadId and threadMessageCount to support thread-aware operations. ' +
+        'TIP: Use threadIds with archiveMessages to ensure entire conversations leave your inbox.',
       inputSchema: {
         query: z.string().describe('Gmail search query'),
         maxResults: z.number().int().min(1).max(100).optional().describe('Maximum results (1-100, default 20)'),
@@ -390,6 +393,14 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
     email: emailSchema,
   };
 
+  // Extended schema for archive operations with thread-aware default behavior
+  const archiveInputSchema = {
+    ...modifyInputSchema,
+    archiveEntireThread: z.boolean().optional().describe(
+      'When true (default), automatically expands messageIds to their parent threads to ensure entire conversations are archived/unarchived. Set to false to archive individual messages only.'
+    ),
+  };
+
   // Helper to validate at least one ID is provided
   function validateModifyInput(args: { messageIds?: string[]; threadIds?: string[] }): string | null {
     if (!args.messageIds?.length && !args.threadIds?.length) {
@@ -402,8 +413,10 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
   server.registerTool(
     'gmail.archiveMessages',
     {
-      description: 'Archive messages or threads (removes from inbox). Requires gmail.labels scope.',
-      inputSchema: modifyInputSchema,
+      description:
+        'Archive messages or threads (removes from inbox). Requires gmail.labels scope. ' +
+        'By default (archiveEntireThread=true), archiving a messageId will archive its entire thread to ensure the conversation leaves your inbox.',
+      inputSchema: archiveInputSchema,
     },
     async (args, extra) => {
       const mcpUserId = getMcpUserId(extra);
@@ -416,7 +429,17 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       }
 
       try {
-        const result = await gmailClient.archiveMessages(mcpUserId, args.messageIds, args.threadIds, args.email);
+        let { messageIds, threadIds } = args;
+        const archiveEntireThread = args.archiveEntireThread ?? true;
+
+        // Convert messageIds to threadIds when archiveEntireThread is true (default)
+        if (archiveEntireThread && messageIds?.length) {
+          const expandedThreadIds = await gmailClient.getThreadIdsForMessages(mcpUserId, messageIds, args.email);
+          threadIds = [...new Set([...(threadIds ?? []), ...expandedThreadIds])];
+          messageIds = undefined;
+        }
+
+        const result = await gmailClient.archiveMessages(mcpUserId, messageIds, threadIds, args.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
@@ -428,8 +451,10 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
   server.registerTool(
     'gmail.unarchiveMessages',
     {
-      description: 'Move messages or threads back to inbox. Requires gmail.labels scope.',
-      inputSchema: modifyInputSchema,
+      description:
+        'Move messages or threads back to inbox. Requires gmail.labels scope. ' +
+        'By default (archiveEntireThread=true), unarchiving a messageId will unarchive its entire thread.',
+      inputSchema: archiveInputSchema,
     },
     async (args, extra) => {
       const mcpUserId = getMcpUserId(extra);
@@ -442,7 +467,17 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       }
 
       try {
-        const result = await gmailClient.unarchiveMessages(mcpUserId, args.messageIds, args.threadIds, args.email);
+        let { messageIds, threadIds } = args;
+        const archiveEntireThread = args.archiveEntireThread ?? true;
+
+        // Convert messageIds to threadIds when archiveEntireThread is true (default)
+        if (archiveEntireThread && messageIds?.length) {
+          const expandedThreadIds = await gmailClient.getThreadIdsForMessages(mcpUserId, messageIds, args.email);
+          threadIds = [...new Set([...(threadIds ?? []), ...expandedThreadIds])];
+          messageIds = undefined;
+        }
+
+        const result = await gmailClient.unarchiveMessages(mcpUserId, messageIds, threadIds, args.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
