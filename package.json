@@ -23,7 +23,10 @@
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f",
     "docker:restart": "docker compose restart",
-    "generate-secrets": "./scripts/generate-secrets.sh"
+    "generate-secrets": "./scripts/generate-secrets.sh",
+    "bin:start": "./scripts/start.sh",
+    "bin:stop": "./scripts/stop.sh",
+    "bin:generate-secrets": "./scripts/generate-secrets.sh"
   },
   "keywords": [
     "mcp",
