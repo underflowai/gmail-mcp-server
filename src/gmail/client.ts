@@ -121,6 +121,17 @@ const GMAIL_COMPOSE_SCOPE = 'https://www.googleapis.com/auth/gmail.compose';
 // Token refresh threshold (5 minutes before expiry)
 const REFRESH_THRESHOLD_MS = 5 * 60 * 1000;
 
+// Default body truncation limits
+const DEFAULT_MAX_BODY_LENGTH = 50000; // 50KB default for full format
+const SUMMARY_MAX_BODY_LENGTH = 2000;  // 2KB for summary format
+
+// Client cache for reusing Gmail clients
+interface CachedClient {
+  client: gmail_v1.Gmail;
+  expiresAt: number;
+}
+const clientCache = new Map<string, CachedClient>();
+
 /**
  * Create a Gmail client factory.
  */
@@ -208,9 +219,18 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
 
   /**
    * Create an authenticated Gmail client for a user.
+   * Clients are cached and reused within their token lifetime.
    */
   async function getGmailClient(mcpUserId: string, email?: string): Promise<gmail_v1.Gmail> {
     const credentials = await getValidCredentials(mcpUserId, email);
+    const cacheKey = `${mcpUserId}:${credentials.email}`;
+
+    // Check cache
+    const cached = clientCache.get(cacheKey);
+    const now = Date.now();
+    if (cached && cached.expiresAt > now) {
+      return cached.client;
+    }
 
     const oauth2Client = new google.auth.OAuth2(
       googleClientId,
@@ -221,12 +241,21 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
       access_token: credentials.accessToken,
     });
 
-    return google.gmail({ version: 'v1', auth: oauth2Client });
+    const client = google.gmail({ version: 'v1', auth: oauth2Client });
+
+    // Cache client until token expires (with 1 minute buffer)
+    clientCache.set(cacheKey, {
+      client,
+      expiresAt: credentials.expiryDate - 60000,
+    });
+
+    return client;
   }
 
   /**
    * Search messages using Gmail query syntax.
    * Returns messages with metadata (snippet, subject, from, date).
+   * Uses parallel fetching for improved performance.
    */
   async function searchMessages(
     mcpUserId: string,
@@ -249,17 +278,15 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
 
       // Collect unique thread IDs for batch fetching thread info
       const threadIds = new Set<string>();
+      const validMessages = messageList.filter(m => m.id && m.threadId);
+      validMessages.forEach(m => threadIds.add(m.threadId!));
 
-      // Fetch metadata for each message
-      const messages: SearchResultMessage[] = [];
-      for (const m of messageList) {
-        if (!m.id || !m.threadId) continue;
-        threadIds.add(m.threadId);
-
+      // Fetch metadata for all messages in parallel
+      const metadataPromises = validMessages.map(async (m) => {
         try {
           const msgResponse = await gmail.users.messages.get({
             userId: 'me',
-            id: m.id,
+            id: m.id!,
             format: 'metadata',
             metadataHeaders: ['From', 'Subject', 'Date'],
           });
@@ -269,36 +296,47 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
           const subjectHeader = headers.find((h: gmail_v1.Schema$MessagePartHeader) => h.name?.toLowerCase() === 'subject');
           const dateHeader = headers.find((h: gmail_v1.Schema$MessagePartHeader) => h.name?.toLowerCase() === 'date');
 
-          messages.push({
-            id: m.id,
-            threadId: m.threadId,
+          return {
+            id: m.id!,
+            threadId: m.threadId!,
             snippet: msgResponse.data.snippet ?? undefined,
             subject: subjectHeader?.value ?? undefined,
             from: fromHeader?.value ?? undefined,
             date: dateHeader?.value ?? undefined,
-          });
+          } as SearchResultMessage;
         } catch {
           // If metadata fetch fails, include basic info
-          messages.push({
-            id: m.id,
-            threadId: m.threadId,
-          });
+          return {
+            id: m.id!,
+            threadId: m.threadId!,
+          } as SearchResultMessage;
         }
-      }
+      });
 
-      // Fetch thread info to get message counts
-      const threadInfoMap = new Map<string, number>();
-      for (const threadId of threadIds) {
+      // Fetch thread info for all threads in parallel
+      const threadInfoPromises = Array.from(threadIds).map(async (threadId) => {
         try {
           const threadResponse = await gmail.users.threads.get({
             userId: 'me',
             id: threadId,
             format: 'minimal',
           });
-          threadInfoMap.set(threadId, threadResponse.data.messages?.length ?? 1);
+          return { threadId, count: threadResponse.data.messages?.length ?? 1 };
         } catch {
-          threadInfoMap.set(threadId, 1);
+          return { threadId, count: 1 };
         }
+      });
+
+      // Wait for all parallel operations to complete
+      const [messages, threadInfoResults] = await Promise.all([
+        Promise.all(metadataPromises),
+        Promise.all(threadInfoPromises),
+      ]);
+
+      // Build thread info map from results
+      const threadInfoMap = new Map<string, number>();
+      for (const { threadId, count } of threadInfoResults) {
+        threadInfoMap.set(threadId, count);
       }
 
       // Attach thread message counts to results
@@ -316,21 +354,55 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
   }
 
   /**
+   * Batch search: run multiple queries in parallel.
+   * Returns results for each query.
+   */
+  async function batchSearchMessages(
+    mcpUserId: string,
+    queries: Array<{ query: string; maxResults?: number }>,
+    email?: string
+  ): Promise<Array<{ query: string; result: SearchResult }>> {
+    const results = await Promise.all(
+      queries.map(async ({ query, maxResults }) => {
+        const result = await searchMessages(mcpUserId, query, maxResults ?? 20, undefined, email);
+        return { query, result };
+      })
+    );
+    return results;
+  }
+
+  /**
    * Get a single message.
+   *
+   * Formats:
+   * - 'metadata': Headers and snippet only (fastest)
+   * - 'summary': Headers, snippet, and first 2KB of text body
+   * - 'full': Complete message with body (supports truncation options)
+   *
+   * Options for 'full' and 'summary' formats:
+   * - maxBodyLength: Truncate body to this many characters (default: 50KB for full, 2KB for summary)
+   * - includeHtml: Include HTML body (default: true for full, false for summary)
    */
   async function getMessage(
     mcpUserId: string,
     messageId: string,
-    format: 'metadata' | 'full' = 'metadata',
-    email?: string
+    format: 'metadata' | 'summary' | 'full' = 'metadata',
+    email?: string,
+    options?: {
+      maxBodyLength?: number;
+      includeHtml?: boolean;
+    }
   ): Promise<MessageMetadata | MessageFull> {
     const gmail = await getGmailClient(mcpUserId, email);
 
     try {
+      // For metadata-only, use metadata format; otherwise use full to get body
+      const apiFormat = format === 'metadata' ? 'metadata' : 'full';
+
       const response = await gmail.users.messages.get({
         userId: 'me',
         id: messageId,
-        format: format === 'full' ? 'full' : 'metadata',
+        format: apiFormat,
         metadataHeaders: ['From', 'To', 'Subject', 'Date'],
       });
 
@@ -346,12 +418,36 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
         attachments,
       };
 
-      if (format === 'full') {
-        const body = extractBody(message.payload);
-        return { ...metadata, body } as MessageFull;
+      if (format === 'metadata') {
+        return metadata;
       }
 
-      return metadata;
+      // Determine truncation settings based on format
+      const isSummary = format === 'summary';
+      const maxBodyLength = options?.maxBodyLength ??
+        (isSummary ? SUMMARY_MAX_BODY_LENGTH : DEFAULT_MAX_BODY_LENGTH);
+      const includeHtml = options?.includeHtml ?? !isSummary;
+
+      const body = extractBody(message.payload, { maxBodyLength, includeHtml });
+
+      // Add truncation info to response
+      const result: MessageFull & { truncated?: boolean; originalSize?: number } = {
+        ...metadata,
+        body,
+      };
+
+      // Check if content was truncated
+      const rawBody = extractBody(message.payload, { maxBodyLength: Infinity, includeHtml: true });
+      const textLength = rawBody.text?.length ?? 0;
+      const htmlLength = rawBody.html?.length ?? 0;
+      const totalOriginalLength = textLength + htmlLength;
+
+      if ((body.text?.length ?? 0) < textLength || (includeHtml && (body.html?.length ?? 0) < htmlLength)) {
+        result.truncated = true;
+        result.originalSize = totalOriginalLength;
+      }
+
+      return result;
     } catch (error: unknown) {
       throw wrapGmailError(error);
     }
@@ -476,6 +572,7 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
   /**
    * Get threadIds for a list of messageIds.
    * Used by archive operations to convert message-level to thread-level operations.
+   * Uses parallel fetching for improved performance.
    */
   async function getThreadIdsForMessages(
     mcpUserId: string,
@@ -483,25 +580,33 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     email?: string
   ): Promise<string[]> {
     const gmail = await getGmailClient(mcpUserId, email);
-    const threadIds: Set<string> = new Set();
 
-    for (const messageId of messageIds) {
-      try {
-        const response = await gmail.users.messages.get({
-          userId: 'me',
-          id: messageId,
-          format: 'minimal',
-          fields: 'threadId',
-        });
-        if (response.data.threadId) {
-          threadIds.add(response.data.threadId);
+    const results = await Promise.all(
+      messageIds.map(async (messageId) => {
+        try {
+          const response = await gmail.users.messages.get({
+            userId: 'me',
+            id: messageId,
+            format: 'minimal',
+            fields: 'threadId',
+          });
+          return response.data.threadId ?? null;
+        } catch (error) {
+          // If message not found, skip it (it may have been deleted)
+          const gmailError = error as { code?: number };
+          if (gmailError.code !== 404) {
+            throw wrapGmailError(error);
+          }
+          return null;
         }
-      } catch (error) {
-        // If message not found, skip it (it may have been deleted)
-        const gmailError = error as { code?: number };
-        if (gmailError.code !== 404) {
-          throw wrapGmailError(error);
-        }
+      })
+    );
+
+    // Collect unique threadIds, filtering out nulls
+    const threadIds = new Set<string>();
+    for (const threadId of results) {
+      if (threadId) {
+        threadIds.add(threadId);
       }
     }
 
@@ -750,6 +855,7 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
 
   /**
    * List all labels.
+   * Uses parallel fetching for improved performance.
    */
   async function listLabels(mcpUserId: string, email?: string): Promise<LabelInfo[]> {
     const gmail = await getGmailClient(mcpUserId, email);
@@ -761,26 +867,26 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
 
       const labels = response.data.labels ?? [];
 
-      // Fetch full info for each label to get counts
-      const labelInfos: LabelInfo[] = [];
-      for (const label of labels) {
-        if (label.id) {
-          try {
-            const info = await getLabelInfo(mcpUserId, label.id, email);
-            labelInfos.push(info);
-          } catch {
-            // Skip labels that fail (e.g., system labels without counts)
-            labelInfos.push({
-              id: label.id,
-              name: label.name ?? label.id,
-              messagesTotal: 0,
-              messagesUnread: 0,
-              threadsTotal: 0,
-              threadsUnread: 0,
-            });
-          }
-        }
-      }
+      // Fetch full info for all labels in parallel
+      const labelInfos = await Promise.all(
+        labels
+          .filter(label => label.id)
+          .map(async (label) => {
+            try {
+              return await getLabelInfo(mcpUserId, label.id!, email);
+            } catch {
+              // Return basic info for labels that fail (e.g., system labels without counts)
+              return {
+                id: label.id!,
+                name: label.name ?? label.id!,
+                messagesTotal: 0,
+                messagesUnread: 0,
+                threadsTotal: 0,
+                threadsUnread: 0,
+              };
+            }
+          })
+      );
 
       return labelInfos;
     } catch (error: unknown) {
@@ -944,6 +1050,7 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
 
   /**
    * List drafts.
+   * Uses parallel fetching for improved performance.
    */
   async function listDrafts(
     mcpUserId: string,
@@ -960,38 +1067,39 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
         pageToken,
       });
 
-      const drafts: DraftInfo[] = [];
-      for (const draft of response.data.drafts ?? []) {
-        // Fetch draft details to get snippet/subject
-        if (draft.id) {
-          try {
-            const draftDetail = await gmail.users.drafts.get({
-              userId: 'me',
-              id: draft.id,
-              format: 'metadata',
-            });
+      // Fetch draft details for all drafts in parallel
+      const drafts = await Promise.all(
+        (response.data.drafts ?? [])
+          .filter(draft => draft.id)
+          .map(async (draft) => {
+            try {
+              const draftDetail = await gmail.users.drafts.get({
+                userId: 'me',
+                id: draft.id!,
+                format: 'metadata',
+              });
 
-            const message = draftDetail.data.message;
-            const headers = message?.payload?.headers ?? [];
-            const subjectHeader = headers.find((h: gmail_v1.Schema$MessagePartHeader) => h.name?.toLowerCase() === 'subject');
-            const toHeader = headers.find((h: gmail_v1.Schema$MessagePartHeader) => h.name?.toLowerCase() === 'to');
+              const message = draftDetail.data.message;
+              const headers = message?.payload?.headers ?? [];
+              const subjectHeader = headers.find((h: gmail_v1.Schema$MessagePartHeader) => h.name?.toLowerCase() === 'subject');
+              const toHeader = headers.find((h: gmail_v1.Schema$MessagePartHeader) => h.name?.toLowerCase() === 'to');
 
-            drafts.push({
-              id: draft.id,
-              messageId: message?.id ?? '',
-              snippet: message?.snippet ?? '',
-              subject: subjectHeader?.value ?? undefined,
-              to: toHeader?.value ?? undefined,
-            });
-          } catch {
-            drafts.push({
-              id: draft.id,
-              messageId: draft.message?.id ?? '',
-              snippet: '',
-            });
-          }
-        }
-      }
+              return {
+                id: draft.id!,
+                messageId: message?.id ?? '',
+                snippet: message?.snippet ?? '',
+                subject: subjectHeader?.value ?? undefined,
+                to: toHeader?.value ?? undefined,
+              } as DraftInfo;
+            } catch {
+              return {
+                id: draft.id!,
+                messageId: draft.message?.id ?? '',
+                snippet: '',
+              } as DraftInfo;
+            }
+          })
+      );
 
       return {
         drafts,
@@ -1172,6 +1280,7 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
   return {
     getValidCredentials,
     searchMessages,
+    batchSearchMessages,
     getMessage,
     listThreads,
     getThread,
@@ -1251,8 +1360,18 @@ function extractAttachments(payload: gmail_v1.Schema$MessagePart | undefined): A
   return attachments;
 }
 
-function extractBody(payload: gmail_v1.Schema$MessagePart | undefined): { text?: string; html?: string } {
+interface ExtractBodyOptions {
+  maxBodyLength?: number;
+  includeHtml?: boolean;
+}
+
+function extractBody(
+  payload: gmail_v1.Schema$MessagePart | undefined,
+  options?: ExtractBodyOptions
+): { text?: string; html?: string } {
   const result: { text?: string; html?: string } = {};
+  const maxLength = options?.maxBodyLength ?? Infinity;
+  const includeHtml = options?.includeHtml ?? true;
 
   if (!payload) return result;
 
@@ -1264,9 +1383,13 @@ function extractBody(payload: gmail_v1.Schema$MessagePart | undefined): { text?:
       const decoded = Buffer.from(data, 'base64').toString('utf-8');
 
       if (mimeType === 'text/plain' && !result.text) {
-        result.text = decoded;
-      } else if (mimeType === 'text/html' && !result.html) {
-        result.html = decoded;
+        result.text = decoded.length > maxLength
+          ? decoded.slice(0, maxLength) + '... [truncated]'
+          : decoded;
+      } else if (mimeType === 'text/html' && !result.html && includeHtml) {
+        result.html = decoded.length > maxLength
+          ? decoded.slice(0, maxLength) + '... [truncated]'
+          : decoded;
       }
     }
 

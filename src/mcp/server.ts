@@ -232,10 +232,15 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
   server.registerTool(
     'gmail.getMessage',
     {
-      description: 'Get a single message by ID',
+      description:
+        'Get a single message by ID. Formats: "metadata" (headers/snippet only, fastest), ' +
+        '"summary" (headers + first 2KB of text body, no HTML), "full" (complete message with truncation options). ' +
+        'Use "summary" for quick content preview without downloading huge HTML emails.',
       inputSchema: {
         messageId: z.string().describe('The message ID'),
-        format: z.enum(['metadata', 'full']).optional().describe('Response format (default: metadata)'),
+        format: z.enum(['metadata', 'summary', 'full']).optional().describe('Response format: metadata (fastest), summary (2KB text preview), or full (default: metadata)'),
+        maxBodyLength: z.number().int().min(100).max(500000).optional().describe('Max characters for body content. Default: 2000 for summary, 50000 for full. Use smaller values for faster responses.'),
+        includeHtml: z.boolean().optional().describe('Include HTML body (default: false for summary, true for full). Set false to reduce response size.'),
         email: emailSchema,
       },
     },
@@ -247,7 +252,11 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
           mcpUserId,
           args.messageId,
           args.format ?? 'metadata',
-          args.email
+          args.email,
+          {
+            maxBodyLength: args.maxBodyLength,
+            includeHtml: args.includeHtml,
+          }
         );
 
         return {
@@ -255,6 +264,50 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
             {
               type: 'text' as const,
               text: JSON.stringify(message),
+            },
+          ],
+        };
+      } catch (error) {
+        return formatError(error);
+      }
+    }
+  );
+
+  // Register gmail.batchSearchMessages tool
+  server.registerTool(
+    'gmail.batchSearchMessages',
+    {
+      description:
+        'Run multiple Gmail search queries in parallel for faster results. ' +
+        'Use this instead of sequential searchMessages calls when you need to search multiple queries. ' +
+        'Each query runs independently and results are returned together.',
+      inputSchema: {
+        queries: z.array(z.object({
+          query: z.string().describe('Gmail search query'),
+          maxResults: z.number().int().min(1).max(100).optional().describe('Maximum results for this query (1-100, default 20)'),
+        })).min(1).max(10).describe('Array of search queries to run in parallel (max 10)'),
+        email: emailSchema,
+      },
+    },
+    async (args, extra) => {
+      const mcpUserId = getMcpUserId(extra);
+
+      try {
+        const results = await gmailClient.batchSearchMessages(
+          mcpUserId,
+          args.queries,
+          args.email
+        );
+
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                results,
+                queryCount: results.length,
+                totalMessages: results.reduce((sum, r) => sum + r.result.messages.length, 0),
+              }),
             },
           ],
         };

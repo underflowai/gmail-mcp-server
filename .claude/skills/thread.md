@@ -56,6 +56,30 @@ Date: {date}
 ...
 ```
 
+## Performance Options
+
+### For quick preview (recommended for initial view):
+Use `gmail_getMessage` with format: 'summary' to get just the first 2KB of text without HTML:
+```
+gmail_getMessage({ messageId: "...", format: "summary" })
+```
+
+### For large emails (newsletters, digests):
+Use truncation options to avoid downloading huge HTML:
+```
+gmail_getMessage({
+  messageId: "...",
+  format: "full",
+  maxBodyLength: 10000,  // Limit to 10KB
+  includeHtml: false     // Skip HTML, just get text
+})
+```
+
+### Format options:
+- `metadata` - Headers and snippet only (fastest)
+- `summary` - Headers + first 2KB of text body, no HTML (good for preview)
+- `full` - Complete message (use `maxBodyLength` and `includeHtml` to control size)
+
 ## Notes
 
 - Show messages in chronological order (oldest first)
@@ -64,3 +88,5 @@ Date: {date}
 - If thread is very long (10+ messages), summarize older messages and show recent in full
 - Extract just the new content from replies (strip quoted text if possible)
 - If no matches found, suggest broadening the search
+- For newsletter/digest emails, use `format: "summary"` or set `includeHtml: false` to avoid huge responses
+- Response includes `truncated: true` and `originalSize` when content was truncated
