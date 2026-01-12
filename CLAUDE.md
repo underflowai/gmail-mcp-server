@@ -16,6 +16,15 @@ npm run typecheck      # Type checking only
 
 Run a single test file: `npx vitest run tests/unit/crypto.test.ts`
 
+### Claude Code Integration
+
+```bash
+npm run claude:setup      # Install MCP server + subagents + skills
+npm run claude:status     # Check what's installed
+npm run claude:uninstall  # Remove integration
+npm run setup:secrets     # Generate encryption keys for .env
+```
+
 ## Architecture Overview
 
 This is an MCP (Model Context Protocol) server that exposes Gmail inbox tools via Streamable HTTP transport. It implements two-layer OAuth: MCP-level JWT authentication and Google OAuth for Gmail access. Supports **multi-inbox**: users can connect multiple Gmail accounts and switch between them.
@@ -33,7 +42,7 @@ MCP Client → Fastify HTTP (/mcp) → MCP Server → Gmail Client → Google AP
 - **`src/index.ts`** - Entry point; initializes config, token store, MCP server, HTTP server
 - **`src/config.ts`** - Zod-validated environment configuration with lazy initialization
 - **`src/http/server.ts`** - Fastify server exposing `/mcp`, `/oauth/*`, `/healthz`, `/.well-known/*`
-- **`src/mcp/server.ts`** - MCP server with 26 tools registered; validates inputs with Zod schemas
+- **`src/mcp/server.ts`** - MCP server with 27 tools registered; validates inputs with Zod schemas
 - **`src/gmail/client.ts`** - Gmail API wrapper with token refresh logic (5-min threshold, exponential backoff)
 - **`src/auth/mcpOAuth.ts`** - MCP-level OAuth: JWT issuance, validation, discovery endpoints
 - **`src/auth/googleOAuth.ts`** - Google OAuth flow with PKCE support and state management
@@ -52,11 +61,11 @@ MCP Client → Fastify HTTP (/mcp) → MCP Server → Gmail Client → Google AP
 - `gmail.listAccounts` lists connected accounts; `gmail.setDefaultAccount` changes default; `gmail.removeAccount` disconnects an account
 - Database uses composite primary key `(mcp_user_id, email)`
 
-### Tool Categories (26 tools)
+### Tool Categories (27 tools)
 
 - Status/Auth: `gmail.status`, `gmail.authorize`
 - Account Management: `gmail.listAccounts`, `gmail.setDefaultAccount`, `gmail.removeAccount`
-- Read: `gmail.searchMessages`, `gmail.getMessage`, `gmail.listThreads`, `gmail.getThread`, `gmail.getAttachmentMetadata`
+- Read: `gmail.searchMessages`, `gmail.batchSearchMessages`, `gmail.getMessage`, `gmail.listThreads`, `gmail.getThread`, `gmail.getAttachmentMetadata`
 - Labels: `gmail.getLabelInfo`, `gmail.listLabels`, `gmail.addLabels`, `gmail.removeLabels`, `gmail.createLabel`
 - Modifications: `gmail.archiveMessages`, `gmail.unarchiveMessages`, `gmail.markAsRead`, `gmail.markAsUnread`, `gmail.starMessages`, `gmail.unstarMessages`
 - Drafts: `gmail.createDraft`, `gmail.listDrafts`, `gmail.getDraft`, `gmail.updateDraft`, `gmail.deleteDraft`
@@ -100,3 +109,19 @@ Set `archiveEntireThread=false` to archive only specific messages (thread may re
 ### Search Results
 
 `searchMessages` returns `threadMessageCount` for each result, indicating how many messages are in that thread. This helps identify multi-message conversations for thread-aware operations.
+
+### Claude Code Subagents & Skills
+
+The project includes Claude Code integration with two types of automation:
+
+**Subagents** (`.claude/agents/`) - Auto-triggered by context:
+- `gmail-triage` - Prioritize inbox ("what needs attention")
+- `gmail-cleanup` - Find archive candidates ("clean up inbox")
+- `gmail-explore` - Inbox analysis ("analyze my inbox")
+- `gmail-research` - Search/summarize ("find emails about X")
+
+**Skills** (`.claude/skills/`) - Explicit `/command` invocation:
+- 14 skills for quick lookups and interactive workflows
+- Run `/gmail-inbox`, `/gmail-search`, `/gmail-compose`, etc.
+
+Subagents run in isolated context and return summaries. Skills run in the conversation context.
