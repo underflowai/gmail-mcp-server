@@ -68,24 +68,47 @@ npm run claude:setup
 
 This installs:
 - MCP server connection to `~/.claude.json`
-- Gmail skills to `~/.claude/skills/`
+- 4 subagents to `~/.claude/agents/` (auto-triggered by context)
+- 14 skills to `~/.claude/skills/` (explicit `/command`)
 
-### Available Skills
+### Subagents (Auto-Triggered)
+
+Subagents run automatically when Claude detects matching context. They operate in isolated context and return concise summaries.
+
+| Subagent | Triggers on... |
+|----------|----------------|
+| `gmail-triage` | "prioritize my inbox", "what needs attention", "urgent emails" |
+| `gmail-cleanup` | "clean up inbox", "what can I archive", "declutter" |
+| `gmail-explore` | "analyze my inbox", "email patterns", "inbox overview" |
+| `gmail-research` | "find emails about X", "summarize emails from Y" |
+
+**Examples:**
+```
+> What needs my attention in email?
+→ Auto-triggers gmail-triage subagent
+
+> Find all emails about the project proposal
+→ Auto-triggers gmail-research subagent
+```
+
+### Skills (Explicit Commands)
+
+Skills run when you explicitly type `/command`. They run in your conversation context.
 
 | Command | Description |
 |---------|-------------|
 | `/gmail-inbox` | Quick inbox status |
 | `/gmail-unread` | List unread messages |
-| `/gmail-triage` | Prioritize unread emails |
-| `/gmail-explore` | Comprehensive inbox overview |
+| `/gmail-starred` | View starred messages |
+| `/gmail-labels` | View all labels |
+| `/gmail-drafts` | View pending drafts |
 | `/gmail-search` | Search with Gmail query syntax |
 | `/gmail-thread` | View a conversation thread |
 | `/gmail-compose` | Draft new emails |
 | `/gmail-summarize` | Summarize email threads |
+| `/gmail-triage` | Prioritize unread emails |
 | `/gmail-cleanup` | Archive and organize inbox |
-| `/gmail-labels` | View all labels |
-| `/gmail-starred` | View starred messages |
-| `/gmail-drafts` | View pending drafts |
+| `/gmail-explore` | Comprehensive inbox overview |
 | `/gmail-connect` | Connect Gmail account |
 | `/gmail-accounts` | View connected accounts |
 
