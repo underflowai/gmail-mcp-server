@@ -816,6 +816,74 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
     }
   );
 
+  // Register gmail.trashMessages tool
+  server.registerTool(
+    'gmail.trashMessages',
+    {
+      description: 'Move messages or threads to Trash. Requires gmail.modify scope.',
+      inputSchema: {
+        messageIds: z.array(z.string()).optional().describe('Message IDs to trash'),
+        threadIds: z.array(z.string()).optional().describe('Thread IDs to trash'),
+        email: emailSchema,
+      },
+    },
+    async (args, extra) => {
+      const mcpUserId = getMcpUserId(extra);
+
+      try {
+        const result = await gmailClient.trashMessages(mcpUserId, args.messageIds, args.threadIds, args.email);
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+      } catch (error) {
+        return formatError(error);
+      }
+    }
+  );
+
+  // Register gmail.untrashMessages tool
+  server.registerTool(
+    'gmail.untrashMessages',
+    {
+      description: 'Move messages or threads out of Trash. Requires gmail.modify scope.',
+      inputSchema: {
+        messageIds: z.array(z.string()).optional().describe('Message IDs to untrash'),
+        threadIds: z.array(z.string()).optional().describe('Thread IDs to untrash'),
+        email: emailSchema,
+      },
+    },
+    async (args, extra) => {
+      const mcpUserId = getMcpUserId(extra);
+
+      try {
+        const result = await gmailClient.untrashMessages(mcpUserId, args.messageIds, args.threadIds, args.email);
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+      } catch (error) {
+        return formatError(error);
+      }
+    }
+  );
+
+  // Register gmail.sendDraft tool
+  server.registerTool(
+    'gmail.sendDraft',
+    {
+      description: 'Send an existing draft. Removes the draft from drafts and delivers it. Requires gmail.compose scope.',
+      inputSchema: {
+        draftId: z.string().describe('The draft ID to send'),
+        email: emailSchema,
+      },
+    },
+    async (args, extra) => {
+      const mcpUserId = getMcpUserId(extra);
+
+      try {
+        const result = await gmailClient.sendDraft(mcpUserId, args.draftId, args.email);
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+      } catch (error) {
+        return formatError(error);
+      }
+    }
+  );
+
   // Register gmail.createDraft tool
   server.registerTool(
     'gmail.createDraft',

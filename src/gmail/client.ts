@@ -1318,6 +1318,96 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
   }
 
   /**
+   * Send an existing draft. Removes the draft and sends its content.
+   */
+  async function sendDraft(
+    mcpUserId: string,
+    draftId: string,
+    email?: string
+  ): Promise<{ messageId: string; threadId: string }> {
+    await checkScope(mcpUserId, GMAIL_COMPOSE_SCOPE, email);
+    const gmail = await getGmailClient(mcpUserId, email);
+
+    try {
+      const response = await gmail.users.drafts.send({
+        userId: 'me',
+        requestBody: { id: draftId },
+      });
+
+      return {
+        messageId: response.data.id!,
+        threadId: response.data.threadId!,
+      };
+    } catch (error: unknown) {
+      throw wrapGmailError(error);
+    }
+  }
+
+  /**
+   * Trash messages or threads (move to Trash).
+   */
+  async function trashMessages(
+    mcpUserId: string,
+    messageIds?: string[],
+    threadIds?: string[],
+    email?: string
+  ): Promise<{ success: boolean; trashed: number }> {
+    await checkScope(mcpUserId, GMAIL_MODIFY_SCOPE, email);
+    const gmail = await getGmailClient(mcpUserId, email);
+
+    let trashed = 0;
+    try {
+      if (messageIds?.length) {
+        for (const id of messageIds) {
+          await gmail.users.messages.trash({ userId: 'me', id });
+          trashed++;
+        }
+      }
+      if (threadIds?.length) {
+        for (const id of threadIds) {
+          await gmail.users.threads.trash({ userId: 'me', id });
+          trashed++;
+        }
+      }
+      return { success: true, trashed };
+    } catch (error: unknown) {
+      throw wrapGmailError(error);
+    }
+  }
+
+  /**
+   * Untrash messages or threads (move out of Trash back to inbox).
+   */
+  async function untrashMessages(
+    mcpUserId: string,
+    messageIds?: string[],
+    threadIds?: string[],
+    email?: string
+  ): Promise<{ success: boolean; untrashed: number }> {
+    await checkScope(mcpUserId, GMAIL_MODIFY_SCOPE, email);
+    const gmail = await getGmailClient(mcpUserId, email);
+
+    let untrashed = 0;
+    try {
+      if (messageIds?.length) {
+        for (const id of messageIds) {
+          await gmail.users.messages.untrash({ userId: 'me', id });
+          untrashed++;
+        }
+      }
+      if (threadIds?.length) {
+        for (const id of threadIds) {
+          await gmail.users.threads.untrash({ userId: 'me', id });
+          untrashed++;
+        }
+      }
+      return { success: true, untrashed };
+    } catch (error: unknown) {
+      throw wrapGmailError(error);
+    }
+  }
+
+  /**
    * Delete a draft.
    */
   async function deleteDraft(mcpUserId: string, draftId: string, email?: string): Promise<{ success: boolean }> {
@@ -1387,7 +1477,11 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     createLabel,
     // Send methods
     sendMessage,
+    // Trash methods
+    trashMessages,
+    untrashMessages,
     // Draft methods
+    sendDraft,
     createDraft,
     listDrafts,
     getDraft,
