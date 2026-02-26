@@ -724,53 +724,38 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     removeLabels: string[],
     email?: string
   ): Promise<BatchModifyResult> {
-    // Check scope once before processing
-    // Note: gmail.modify scope is required to add/remove labels on messages
     await checkScope(mcpUserId, GMAIL_MODIFY_SCOPE, email);
+    const gmail = await getGmailClient(mcpUserId, email);
 
-    const results: ModifyResult[] = [];
+    const promises: Promise<ModifyResult>[] = [];
 
-    // Process messages
     if (messageIds) {
       for (const id of messageIds) {
-        const gmail = await getGmailClient(mcpUserId, email);
-        try {
-          await gmail.users.messages.modify({
+        promises.push(
+          gmail.users.messages.modify({
             userId: 'me',
             id,
-            requestBody: {
-              addLabelIds: addLabels,
-              removeLabelIds: removeLabels,
-            },
-          });
-          results.push({ id, success: true });
-        } catch (error: unknown) {
-          const wrapped = wrapGmailError(error);
-          results.push({ id, success: false, error: wrapped.message });
-        }
+            requestBody: { addLabelIds: addLabels, removeLabelIds: removeLabels },
+          }).then(() => ({ id, success: true as const }))
+            .catch((error: unknown) => ({ id, success: false as const, error: wrapGmailError(error).message }))
+        );
       }
     }
 
-    // Process threads
     if (threadIds) {
       for (const id of threadIds) {
-        const gmail = await getGmailClient(mcpUserId, email);
-        try {
-          await gmail.users.threads.modify({
+        promises.push(
+          gmail.users.threads.modify({
             userId: 'me',
             id,
-            requestBody: {
-              addLabelIds: addLabels,
-              removeLabelIds: removeLabels,
-            },
-          });
-          results.push({ id, success: true });
-        } catch (error: unknown) {
-          const wrapped = wrapGmailError(error);
-          results.push({ id, success: false, error: wrapped.message });
-        }
+            requestBody: { addLabelIds: addLabels, removeLabelIds: removeLabels },
+          }).then(() => ({ id, success: true as const }))
+            .catch((error: unknown) => ({ id, success: false as const, error: wrapGmailError(error).message }))
+        );
       }
     }
+
+    const results = await Promise.all(promises);
 
     return {
       results,
@@ -1378,21 +1363,22 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     await checkScope(mcpUserId, GMAIL_MODIFY_SCOPE, email);
     const gmail = await getGmailClient(mcpUserId, email);
 
-    let trashed = 0;
+    const promises: Promise<void>[] = [];
+
+    if (messageIds?.length) {
+      for (const id of messageIds) {
+        promises.push(gmail.users.messages.trash({ userId: 'me', id }).then(() => {}));
+      }
+    }
+    if (threadIds?.length) {
+      for (const id of threadIds) {
+        promises.push(gmail.users.threads.trash({ userId: 'me', id }).then(() => {}));
+      }
+    }
+
     try {
-      if (messageIds?.length) {
-        for (const id of messageIds) {
-          await gmail.users.messages.trash({ userId: 'me', id });
-          trashed++;
-        }
-      }
-      if (threadIds?.length) {
-        for (const id of threadIds) {
-          await gmail.users.threads.trash({ userId: 'me', id });
-          trashed++;
-        }
-      }
-      return { success: true, trashed };
+      await Promise.all(promises);
+      return { success: true, trashed: promises.length };
     } catch (error: unknown) {
       throw wrapGmailError(error);
     }
@@ -1410,21 +1396,22 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     await checkScope(mcpUserId, GMAIL_MODIFY_SCOPE, email);
     const gmail = await getGmailClient(mcpUserId, email);
 
-    let untrashed = 0;
+    const promises: Promise<void>[] = [];
+
+    if (messageIds?.length) {
+      for (const id of messageIds) {
+        promises.push(gmail.users.messages.untrash({ userId: 'me', id }).then(() => {}));
+      }
+    }
+    if (threadIds?.length) {
+      for (const id of threadIds) {
+        promises.push(gmail.users.threads.untrash({ userId: 'me', id }).then(() => {}));
+      }
+    }
+
     try {
-      if (messageIds?.length) {
-        for (const id of messageIds) {
-          await gmail.users.messages.untrash({ userId: 'me', id });
-          untrashed++;
-        }
-      }
-      if (threadIds?.length) {
-        for (const id of threadIds) {
-          await gmail.users.threads.untrash({ userId: 'me', id });
-          untrashed++;
-        }
-      }
-      return { success: true, untrashed };
+      await Promise.all(promises);
+      return { success: true, untrashed: promises.length };
     } catch (error: unknown) {
       throw wrapGmailError(error);
     }
