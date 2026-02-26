@@ -1049,6 +1049,88 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
   }
 
   /**
+   * Send an email message directly.
+   * Supports replies via replyToMessageId (preserves threading).
+   */
+  async function sendMessage(
+    mcpUserId: string,
+    to: string | string[],
+    subject: string,
+    body: string,
+    options?: {
+      cc?: string | string[];
+      bcc?: string | string[];
+      isHtml?: boolean;
+      replyToMessageId?: string;
+    },
+    email?: string
+  ): Promise<{ messageId: string; threadId: string }> {
+    await checkScope(mcpUserId, GMAIL_COMPOSE_SCOPE, email);
+    const gmail = await getGmailClient(mcpUserId, email);
+
+    let inReplyTo = '';
+    let references = '';
+    let threadId: string | undefined;
+
+    if (options?.replyToMessageId) {
+      const originalMsg = await gmail.users.messages.get({
+        userId: 'me',
+        id: options.replyToMessageId,
+        format: 'metadata',
+        metadataHeaders: ['Message-ID', 'References'],
+      });
+
+      threadId = originalMsg.data.threadId ?? undefined;
+
+      const messageIdHeader = originalMsg.data.payload?.headers?.find(
+        (h) => h.name?.toLowerCase() === 'message-id'
+      );
+      if (messageIdHeader?.value) {
+        inReplyTo = messageIdHeader.value;
+        const referencesHeader = originalMsg.data.payload?.headers?.find(
+          (h) => h.name?.toLowerCase() === 'references'
+        );
+        references = referencesHeader?.value
+          ? `${referencesHeader.value} ${inReplyTo}`
+          : inReplyTo;
+      }
+    }
+
+    const toAddrs = Array.isArray(to) ? to.join(', ') : to;
+    const ccAddrs = options?.cc ? (Array.isArray(options.cc) ? options.cc.join(', ') : options.cc) : '';
+    const bccAddrs = options?.bcc ? (Array.isArray(options.bcc) ? options.bcc.join(', ') : options.bcc) : '';
+    const contentType = options?.isHtml ? 'text/html' : 'text/plain';
+
+    let rawEmail = `To: ${toAddrs}\r\n`;
+    if (ccAddrs) rawEmail += `Cc: ${ccAddrs}\r\n`;
+    if (bccAddrs) rawEmail += `Bcc: ${bccAddrs}\r\n`;
+    if (inReplyTo) rawEmail += `In-Reply-To: ${inReplyTo}\r\n`;
+    if (references) rawEmail += `References: ${references}\r\n`;
+    rawEmail += `Subject: ${subject}\r\n`;
+    rawEmail += `Content-Type: ${contentType}; charset=utf-8\r\n\r\n`;
+    rawEmail += body;
+
+    const encodedEmail = Buffer.from(rawEmail).toString('base64url');
+
+    try {
+      const response = await gmail.users.messages.send({
+        userId: 'me',
+        requestBody: {
+          raw: encodedEmail,
+          threadId,
+        },
+      });
+
+      return {
+        messageId: response.data.id!,
+        threadId: response.data.threadId!,
+      };
+    } catch (error: unknown) {
+      throw wrapGmailError(error);
+    }
+  }
+
+  /**
    * List drafts.
    * Uses parallel fetching for improved performance.
    */
@@ -1303,6 +1385,8 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     addLabels,
     removeLabels,
     createLabel,
+    // Send methods
+    sendMessage,
     // Draft methods
     createDraft,
     listDrafts,

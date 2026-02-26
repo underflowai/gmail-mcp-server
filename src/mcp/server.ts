@@ -783,6 +783,39 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
     }
   );
 
+  // Register gmail.sendMessage tool
+  server.registerTool(
+    'gmail.sendMessage',
+    {
+      description: 'Send an email message. For replies, provide replyToMessageId to preserve threading. Requires gmail.compose scope.',
+      inputSchema: {
+        to: z.union([z.string(), z.array(z.string())]).describe('Recipient email address(es)'),
+        subject: z.string().describe('Email subject'),
+        body: z.string().describe('Email body content'),
+        cc: z.union([z.string(), z.array(z.string())]).optional().describe('CC recipient(s)'),
+        bcc: z.union([z.string(), z.array(z.string())]).optional().describe('BCC recipient(s)'),
+        isHtml: z.boolean().optional().describe('Whether body is HTML (default: false, plain text)'),
+        replyToMessageId: z.string().optional().describe('Message ID to reply to. Preserves threading with proper In-Reply-To and References headers.'),
+        email: emailSchema,
+      },
+    },
+    async (args, extra) => {
+      const mcpUserId = getMcpUserId(extra);
+
+      try {
+        const result = await gmailClient.sendMessage(mcpUserId, args.to, args.subject, args.body, {
+          cc: args.cc,
+          bcc: args.bcc,
+          isHtml: args.isHtml,
+          replyToMessageId: args.replyToMessageId,
+        }, args.email);
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+      } catch (error) {
+        return formatError(error);
+      }
+    }
+  );
+
   // Register gmail.createDraft tool
   server.registerTool(
     'gmail.createDraft',
