@@ -133,6 +133,29 @@ interface CachedClient {
 const clientCache = new Map<string, CachedClient>();
 
 /**
+ * Simple async semaphore to limit concurrent Gmail API calls.
+ * Prevents overwhelming the Gmail API rate limits when many
+ * requests arrive in parallel (e.g., agent issues 20+ email_get calls).
+ */
+const MAX_CONCURRENT_GMAIL_CALLS = 5;
+let activeGmailCalls = 0;
+const waitQueue: Array<() => void> = [];
+
+async function withGmailConcurrency<T>(fn: () => Promise<T>): Promise<T> {
+  if (activeGmailCalls >= MAX_CONCURRENT_GMAIL_CALLS) {
+    await new Promise<void>((resolve) => waitQueue.push(resolve));
+  }
+  activeGmailCalls++;
+  try {
+    return await fn();
+  } finally {
+    activeGmailCalls--;
+    const next = waitQueue.shift();
+    if (next) next();
+  }
+}
+
+/**
  * Create a Gmail client factory.
  */
 export function createGmailClientFactory(deps: GmailClientDependencies) {
@@ -1449,45 +1472,52 @@ export function createGmailClientFactory(deps: GmailClientDependencies) {
     await tokenStore.deleteCredentials(mcpUserId, accountEmail);
   }
 
+  // Wrap Gmail API methods with concurrency limiter
+  function limited<TArgs extends unknown[], TResult>(
+    fn: (...args: TArgs) => Promise<TResult>
+  ): (...args: TArgs) => Promise<TResult> {
+    return (...args: TArgs) => withGmailConcurrency(() => fn(...args));
+  }
+
   return {
     getValidCredentials,
-    searchMessages,
-    batchSearchMessages,
-    getMessage,
-    listThreads,
-    getThread,
-    getAttachmentMetadata,
-    getThreadIdsForMessages,
+    searchMessages: limited(searchMessages),
+    batchSearchMessages: limited(batchSearchMessages),
+    getMessage: limited(getMessage),
+    listThreads: limited(listThreads),
+    getThread: limited(getThread),
+    getAttachmentMetadata: limited(getAttachmentMetadata),
+    getThreadIdsForMessages: limited(getThreadIdsForMessages),
     // Modification methods
     checkScope,
-    modifyMessage,
-    modifyThread,
-    batchModify,
-    archiveMessages,
-    unarchiveMessages,
-    markAsRead,
-    markAsUnread,
-    starMessages,
-    unstarMessages,
+    modifyMessage: limited(modifyMessage),
+    modifyThread: limited(modifyThread),
+    batchModify: limited(batchModify),
+    archiveMessages: limited(archiveMessages),
+    unarchiveMessages: limited(unarchiveMessages),
+    markAsRead: limited(markAsRead),
+    markAsUnread: limited(markAsUnread),
+    starMessages: limited(starMessages),
+    unstarMessages: limited(unstarMessages),
     // Label methods
-    getLabelInfo,
-    listLabels,
-    addLabels,
-    removeLabels,
-    createLabel,
+    getLabelInfo: limited(getLabelInfo),
+    listLabels: limited(listLabels),
+    addLabels: limited(addLabels),
+    removeLabels: limited(removeLabels),
+    createLabel: limited(createLabel),
     // Send methods
-    sendMessage,
+    sendMessage: limited(sendMessage),
     // Trash methods
-    trashMessages,
-    untrashMessages,
+    trashMessages: limited(trashMessages),
+    untrashMessages: limited(untrashMessages),
     // Draft methods
-    sendDraft,
-    createDraft,
-    listDrafts,
-    getDraft,
-    updateDraft,
-    deleteDraft,
-    // Account management methods
+    sendDraft: limited(sendDraft),
+    createDraft: limited(createDraft),
+    listDrafts: limited(listDrafts),
+    getDraft: limited(getDraft),
+    updateDraft: limited(updateDraft),
+    deleteDraft: limited(deleteDraft),
+    // Account management methods (no rate limiting — SQLite only)
     listAccounts,
     setDefaultAccount,
     removeAccount,
