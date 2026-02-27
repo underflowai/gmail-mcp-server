@@ -1,20 +1,16 @@
 /**
  * MCP Server setup using @modelcontextprotocol/sdk
  *
- * This module implements all Gmail MCP tools:
- * - gmail.authorize: Initiates OAuth flow
- * - gmail.status: Returns authorization status
- * - gmail.searchMessages: Search messages using Gmail query syntax
- * - gmail.getMessage: Get a single message by ID
- * - gmail.listThreads: List conversation threads
- * - gmail.getThread: Get a thread with all messages
- * - gmail.getAttachmentMetadata: Get attachment info
- * - gmail.archiveMessages: Archive messages/threads
- * - gmail.unarchiveMessages: Unarchive messages/threads
- * - gmail.markAsRead: Mark messages/threads as read
- * - gmail.markAsUnread: Mark messages/threads as unread
- * - gmail.starMessages: Star messages/threads
- * - gmail.unstarMessages: Unstar messages/threads
+ * Gmail MCP tools:
+ * - gmail.status / gmail.authorize — auth and connection
+ * - gmail.searchMessages — single or batch message search
+ * - gmail.getMessage / gmail.getThread / gmail.listThreads — read
+ * - gmail.getAttachmentMetadata / gmail.listLabels / gmail.getLabelInfo — metadata
+ * - gmail.organizeMessages — archive, star, trash, label, read/unread (batched)
+ * - gmail.sendMessage — send email
+ * - gmail.manageDraft — create, get, update, delete, send, list drafts
+ * - gmail.createLabel — create custom labels
+ * - gmail.listAccounts / gmail.setDefaultAccount / gmail.removeAccount — account mgmt
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -187,41 +183,61 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
     }
   );
 
-  // Register gmail.searchMessages tool
+  // Register gmail.searchMessages tool (also handles batch searches via queries array)
   server.registerTool(
     'gmail.searchMessages',
     {
       description:
-        'Search messages using Gmail query syntax (e.g., "from:john subject:meeting"). ' +
-        'Results include threadId and threadMessageCount to support thread-aware operations. ' +
-        'TIP: Use threadIds with archiveMessages to ensure entire conversations leave your inbox.',
+        'Search messages using Gmail query syntax. Two modes:\n' +
+        '- Single search: pass "query" (string) with optional maxResults/pageToken\n' +
+        '- Batch search: pass "queries" (array of {query, maxResults?}) to run multiple searches in parallel\n' +
+        'Provide exactly one of "query" or "queries".',
       inputSchema: {
-        query: z.string().describe('Gmail search query'),
-        maxResults: z.number().int().min(1).max(100).optional().describe('Maximum results (1-100, default 20)'),
-        pageToken: z.string().optional().describe('Token for pagination'),
+        query: z.string().optional().describe('Gmail search query (for single search)'),
+        queries: z.array(z.object({
+          query: z.string().describe('Gmail search query'),
+          maxResults: z.number().int().min(1).max(100).optional().describe('Max results for this query (default 20)'),
+        })).min(1).max(10).optional().describe('Array of search queries for batch search (max 10)'),
+        maxResults: z.number().int().min(1).max(100).optional().describe('Maximum results for single search (1-100, default 20)'),
+        pageToken: z.string().optional().describe('Token for pagination (single search only)'),
         email: emailSchema,
       },
     },
     async (args, extra) => {
       const mcpUserId = getMcpUserId(extra);
+      const hasQuery = typeof args.query === 'string';
+      const hasQueries = Array.isArray(args.queries) && args.queries.length > 0;
+
+      if (hasQuery === hasQueries) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Provide exactly one of "query" or "queries"', code: -32602 }) }],
+          isError: true,
+        };
+      }
 
       try {
+        if (hasQueries) {
+          const results = await gmailClient.batchSearchMessages(mcpUserId, args.queries!, args.email);
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                results,
+                queryCount: results.length,
+                totalMessages: results.reduce((sum: number, r: { result: { messages: unknown[] } }) => sum + r.result.messages.length, 0),
+              }),
+            }],
+          };
+        }
+
         const result = await gmailClient.searchMessages(
           mcpUserId,
-          args.query,
+          args.query!,
           args.maxResults ?? 20,
           args.pageToken,
           args.email
         );
-
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify(result),
-            },
-          ],
-        };
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
       }
@@ -264,50 +280,6 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
             {
               type: 'text' as const,
               text: JSON.stringify(message),
-            },
-          ],
-        };
-      } catch (error) {
-        return formatError(error);
-      }
-    }
-  );
-
-  // Register gmail.batchSearchMessages tool
-  server.registerTool(
-    'gmail.batchSearchMessages',
-    {
-      description:
-        'Run multiple Gmail search queries in parallel for faster results. ' +
-        'Use this instead of sequential searchMessages calls when you need to search multiple queries. ' +
-        'Each query runs independently and results are returned together.',
-      inputSchema: {
-        queries: z.array(z.object({
-          query: z.string().describe('Gmail search query'),
-          maxResults: z.number().int().min(1).max(100).optional().describe('Maximum results for this query (1-100, default 20)'),
-        })).min(1).max(10).describe('Array of search queries to run in parallel (max 10)'),
-        email: emailSchema,
-      },
-    },
-    async (args, extra) => {
-      const mcpUserId = getMcpUserId(extra);
-
-      try {
-        const results = await gmailClient.batchSearchMessages(
-          mcpUserId,
-          args.queries,
-          args.email
-        );
-
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify({
-                results,
-                queryCount: results.length,
-                totalMessages: results.reduce((sum, r) => sum + r.result.messages.length, 0),
-              }),
             },
           ],
         };
@@ -439,206 +411,108 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
     }
   );
 
-  // Shared input schema for modification tools
-  const modifyInputSchema = {
-    messageIds: z.array(z.string()).optional().describe('Array of message IDs to modify'),
-    threadIds: z.array(z.string()).optional().describe('Array of thread IDs to modify (applies to all messages in thread)'),
-    email: emailSchema,
-  };
+  // ============== ORGANIZE TOOL ==============
 
-  // Extended schema for archive operations with thread-aware default behavior
-  const archiveInputSchema = {
-    ...modifyInputSchema,
-    archiveEntireThread: z.boolean().optional().describe(
-      'When true (default), automatically expands messageIds to their parent threads to ensure entire conversations are archived/unarchived. Set to false to archive individual messages only.'
-    ),
-  };
+  const ORGANIZE_ACTIONS = [
+    'archive', 'unarchive',
+    'mark_read', 'mark_unread',
+    'star', 'unstar',
+    'trash', 'untrash',
+    'add_labels', 'remove_labels',
+  ] as const;
 
-  // Helper to validate at least one ID is provided
-  function validateModifyInput(args: { messageIds?: string[]; threadIds?: string[] }): string | null {
-    if (!args.messageIds?.length && !args.threadIds?.length) {
-      return 'At least one messageId or threadId must be provided';
-    }
-    return null;
-  }
+  type OrganizeAction = (typeof ORGANIZE_ACTIONS)[number];
 
-  // Register gmail.archiveMessages tool
   server.registerTool(
-    'gmail.archiveMessages',
+    'gmail.organizeMessages',
     {
       description:
-        'Archive messages or threads (removes from inbox). Requires gmail.labels scope. ' +
-        'By default (archiveEntireThread=true), archiving a messageId will archive its entire thread to ensure the conversation leaves your inbox.',
-      inputSchema: archiveInputSchema,
+        'Apply one or more organize actions to messages/threads in a single call. ' +
+        'Supported actions: archive, unarchive, mark_read, mark_unread, star, unstar, trash, untrash, add_labels, remove_labels. ' +
+        'Each action item specifies its own messageIds/threadIds. ' +
+        'For archive/unarchive, set archiveEntireThread (default true) to auto-expand messageIds to their parent threads.',
+      inputSchema: {
+        actions: z.array(z.object({
+          action: z.enum(ORGANIZE_ACTIONS).describe('The organize operation to perform'),
+          messageIds: z.array(z.string()).optional().describe('Message IDs to act on'),
+          threadIds: z.array(z.string()).optional().describe('Thread IDs to act on'),
+          labelIds: z.array(z.string()).optional().describe('Label IDs (required for add_labels/remove_labels)'),
+          archiveEntireThread: z.boolean().optional().describe('For archive/unarchive: expand messageIds to full threads (default true)'),
+        })).min(1).describe('Array of organize actions to apply'),
+        email: emailSchema,
+      },
     },
     async (args, extra) => {
       const mcpUserId = getMcpUserId(extra);
-      const validationError = validateModifyInput(args);
-      if (validationError) {
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: validationError, code: -32602 }) }],
-          isError: true,
-        };
-      }
+      const results: Array<{ action: OrganizeAction; ok: boolean; result?: unknown; error?: string }> = [];
 
-      try {
-        let { messageIds, threadIds } = args;
-        const archiveEntireThread = args.archiveEntireThread ?? true;
-
-        // Convert messageIds to threadIds when archiveEntireThread is true (default)
-        if (archiveEntireThread && messageIds?.length) {
-          const expandedThreadIds = await gmailClient.getThreadIdsForMessages(mcpUserId, messageIds, args.email);
-          threadIds = [...new Set([...(threadIds ?? []), ...expandedThreadIds])];
-          messageIds = undefined;
+      for (const item of args.actions) {
+        if (!item.messageIds?.length && !item.threadIds?.length) {
+          results.push({ action: item.action, ok: false, error: 'At least one messageId or threadId must be provided' });
+          continue;
         }
 
-        const result = await gmailClient.archiveMessages(mcpUserId, messageIds, threadIds, args.email);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-      } catch (error) {
-        return formatError(error);
-      }
-    }
-  );
+        try {
+          let { messageIds, threadIds } = item;
+          const expandThread = item.archiveEntireThread ?? true;
 
-  // Register gmail.unarchiveMessages tool
-  server.registerTool(
-    'gmail.unarchiveMessages',
-    {
-      description:
-        'Move messages or threads back to inbox. Requires gmail.labels scope. ' +
-        'By default (archiveEntireThread=true), unarchiving a messageId will unarchive its entire thread.',
-      inputSchema: archiveInputSchema,
-    },
-    async (args, extra) => {
-      const mcpUserId = getMcpUserId(extra);
-      const validationError = validateModifyInput(args);
-      if (validationError) {
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: validationError, code: -32602 }) }],
-          isError: true,
-        };
-      }
+          if ((item.action === 'archive' || item.action === 'unarchive') && expandThread && messageIds?.length) {
+            const expanded = await gmailClient.getThreadIdsForMessages(mcpUserId, messageIds, args.email);
+            threadIds = [...new Set([...(threadIds ?? []), ...expanded])];
+            messageIds = undefined;
+          }
 
-      try {
-        let { messageIds, threadIds } = args;
-        const archiveEntireThread = args.archiveEntireThread ?? true;
-
-        // Convert messageIds to threadIds when archiveEntireThread is true (default)
-        if (archiveEntireThread && messageIds?.length) {
-          const expandedThreadIds = await gmailClient.getThreadIdsForMessages(mcpUserId, messageIds, args.email);
-          threadIds = [...new Set([...(threadIds ?? []), ...expandedThreadIds])];
-          messageIds = undefined;
+          let result: unknown;
+          switch (item.action) {
+            case 'archive':
+              result = await gmailClient.archiveMessages(mcpUserId, messageIds, threadIds, args.email);
+              break;
+            case 'unarchive':
+              result = await gmailClient.unarchiveMessages(mcpUserId, messageIds, threadIds, args.email);
+              break;
+            case 'mark_read':
+              result = await gmailClient.markAsRead(mcpUserId, messageIds, threadIds, args.email);
+              break;
+            case 'mark_unread':
+              result = await gmailClient.markAsUnread(mcpUserId, messageIds, threadIds, args.email);
+              break;
+            case 'star':
+              result = await gmailClient.starMessages(mcpUserId, messageIds, threadIds, args.email);
+              break;
+            case 'unstar':
+              result = await gmailClient.unstarMessages(mcpUserId, messageIds, threadIds, args.email);
+              break;
+            case 'trash':
+              result = await gmailClient.trashMessages(mcpUserId, messageIds, threadIds, args.email);
+              break;
+            case 'untrash':
+              result = await gmailClient.untrashMessages(mcpUserId, messageIds, threadIds, args.email);
+              break;
+            case 'add_labels':
+              if (!item.labelIds?.length) {
+                results.push({ action: item.action, ok: false, error: 'labelIds required for add_labels' });
+                continue;
+              }
+              result = await gmailClient.addLabels(mcpUserId, messageIds, threadIds, item.labelIds, args.email);
+              break;
+            case 'remove_labels':
+              if (!item.labelIds?.length) {
+                results.push({ action: item.action, ok: false, error: 'labelIds required for remove_labels' });
+                continue;
+              }
+              result = await gmailClient.removeLabels(mcpUserId, messageIds, threadIds, item.labelIds, args.email);
+              break;
+          }
+          results.push({ action: item.action, ok: true, result });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          results.push({ action: item.action, ok: false, error: message });
         }
-
-        const result = await gmailClient.unarchiveMessages(mcpUserId, messageIds, threadIds, args.email);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-      } catch (error) {
-        return formatError(error);
-      }
-    }
-  );
-
-  // Register gmail.markAsRead tool
-  server.registerTool(
-    'gmail.markAsRead',
-    {
-      description: 'Mark messages or threads as read. Requires gmail.labels scope.',
-      inputSchema: modifyInputSchema,
-    },
-    async (args, extra) => {
-      const mcpUserId = getMcpUserId(extra);
-      const validationError = validateModifyInput(args);
-      if (validationError) {
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: validationError, code: -32602 }) }],
-          isError: true,
-        };
       }
 
-      try {
-        const result = await gmailClient.markAsRead(mcpUserId, args.messageIds, args.threadIds, args.email);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-      } catch (error) {
-        return formatError(error);
-      }
-    }
-  );
-
-  // Register gmail.markAsUnread tool
-  server.registerTool(
-    'gmail.markAsUnread',
-    {
-      description: 'Mark messages or threads as unread. Requires gmail.labels scope.',
-      inputSchema: modifyInputSchema,
-    },
-    async (args, extra) => {
-      const mcpUserId = getMcpUserId(extra);
-      const validationError = validateModifyInput(args);
-      if (validationError) {
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: validationError, code: -32602 }) }],
-          isError: true,
-        };
-      }
-
-      try {
-        const result = await gmailClient.markAsUnread(mcpUserId, args.messageIds, args.threadIds, args.email);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-      } catch (error) {
-        return formatError(error);
-      }
-    }
-  );
-
-  // Register gmail.starMessages tool
-  server.registerTool(
-    'gmail.starMessages',
-    {
-      description: 'Add star to messages or threads. Requires gmail.labels scope.',
-      inputSchema: modifyInputSchema,
-    },
-    async (args, extra) => {
-      const mcpUserId = getMcpUserId(extra);
-      const validationError = validateModifyInput(args);
-      if (validationError) {
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: validationError, code: -32602 }) }],
-          isError: true,
-        };
-      }
-
-      try {
-        const result = await gmailClient.starMessages(mcpUserId, args.messageIds, args.threadIds, args.email);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-      } catch (error) {
-        return formatError(error);
-      }
-    }
-  );
-
-  // Register gmail.unstarMessages tool
-  server.registerTool(
-    'gmail.unstarMessages',
-    {
-      description: 'Remove star from messages or threads. Requires gmail.labels scope.',
-      inputSchema: modifyInputSchema,
-    },
-    async (args, extra) => {
-      const mcpUserId = getMcpUserId(extra);
-      const validationError = validateModifyInput(args);
-      if (validationError) {
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: validationError, code: -32602 }) }],
-          isError: true,
-        };
-      }
-
-      try {
-        const result = await gmailClient.unstarMessages(mcpUserId, args.messageIds, args.threadIds, args.email);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-      } catch (error) {
-        return formatError(error);
-      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ results, actionCount: results.length }) }],
+      };
     }
   );
 
@@ -679,82 +553,6 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
       try {
         const result = await gmailClient.listLabels(mcpUserId, args?.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify({ labels: result }) }] };
-      } catch (error) {
-        return formatError(error);
-      }
-    }
-  );
-
-  // Register gmail.addLabels tool
-  server.registerTool(
-    'gmail.addLabels',
-    {
-      description: 'Add labels to messages or threads. Requires gmail.labels scope.',
-      inputSchema: {
-        messageIds: z.array(z.string()).optional().describe('Array of message IDs to modify'),
-        threadIds: z.array(z.string()).optional().describe('Array of thread IDs to modify'),
-        labelIds: z.array(z.string()).describe('Array of label IDs to add'),
-        email: emailSchema,
-      },
-    },
-    async (args, extra) => {
-      const mcpUserId = getMcpUserId(extra);
-
-      if (!args.messageIds?.length && !args.threadIds?.length) {
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: 'At least one messageId or threadId must be provided', code: -32602 }) }],
-          isError: true,
-        };
-      }
-
-      if (!args.labelIds?.length) {
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: 'At least one labelId must be provided', code: -32602 }) }],
-          isError: true,
-        };
-      }
-
-      try {
-        const result = await gmailClient.addLabels(mcpUserId, args.messageIds, args.threadIds, args.labelIds, args.email);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-      } catch (error) {
-        return formatError(error);
-      }
-    }
-  );
-
-  // Register gmail.removeLabels tool
-  server.registerTool(
-    'gmail.removeLabels',
-    {
-      description: 'Remove labels from messages or threads. Requires gmail.labels scope.',
-      inputSchema: {
-        messageIds: z.array(z.string()).optional().describe('Array of message IDs to modify'),
-        threadIds: z.array(z.string()).optional().describe('Array of thread IDs to modify'),
-        labelIds: z.array(z.string()).describe('Array of label IDs to remove'),
-        email: emailSchema,
-      },
-    },
-    async (args, extra) => {
-      const mcpUserId = getMcpUserId(extra);
-
-      if (!args.messageIds?.length && !args.threadIds?.length) {
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: 'At least one messageId or threadId must be provided', code: -32602 }) }],
-          isError: true,
-        };
-      }
-
-      if (!args.labelIds?.length) {
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: 'At least one labelId must be provided', code: -32602 }) }],
-          isError: true,
-        };
-      }
-
-      try {
-        const result = await gmailClient.removeLabels(mcpUserId, args.messageIds, args.threadIds, args.labelIds, args.email);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
       }
@@ -816,201 +614,81 @@ export async function createMcpServer(deps: McpServerDependencies): Promise<McpS
     }
   );
 
-  // Register gmail.trashMessages tool
+  // ============== DRAFT LIFECYCLE TOOL ==============
+
+  const DRAFT_ACTIONS = ['create', 'get', 'update', 'delete', 'send', 'list'] as const;
+
+  const recipientSchema = z.union([z.string(), z.array(z.string())]);
+
   server.registerTool(
-    'gmail.trashMessages',
+    'gmail.manageDraft',
     {
-      description: 'Move messages or threads to Trash. Requires gmail.modify scope.',
+      description:
+        'Manage draft emails. Actions:\n' +
+        '- "create": create a new draft (requires to, subject, body)\n' +
+        '- "get": get a draft with full content (requires draftId)\n' +
+        '- "update": update an existing draft (requires draftId, to, subject, body)\n' +
+        '- "delete": delete a draft (requires draftId)\n' +
+        '- "send": send an existing draft (requires draftId)\n' +
+        '- "list": list all drafts (optional maxResults, pageToken)',
       inputSchema: {
-        messageIds: z.array(z.string()).optional().describe('Message IDs to trash'),
-        threadIds: z.array(z.string()).optional().describe('Thread IDs to trash'),
+        action: z.enum(DRAFT_ACTIONS).describe('Draft operation to perform'),
+        draftId: z.string().optional().describe('Draft ID (required for get/update/delete/send)'),
+        to: recipientSchema.optional().describe('Recipient email address(es) (for create/update)'),
+        subject: z.string().optional().describe('Email subject (for create/update)'),
+        body: z.string().optional().describe('Email body content (for create/update)'),
+        cc: recipientSchema.optional().describe('CC recipient(s)'),
+        bcc: recipientSchema.optional().describe('BCC recipient(s)'),
+        isHtml: z.boolean().optional().describe('Whether body is HTML (default: false)'),
+        replyToMessageId: z.string().optional().describe('Message ID to reply to (preserves threading)'),
+        maxResults: z.number().int().min(1).max(100).optional().describe('Max results for list (default 20)'),
+        pageToken: z.string().optional().describe('Pagination token for list'),
         email: emailSchema,
       },
     },
     async (args, extra) => {
       const mcpUserId = getMcpUserId(extra);
+      const composeOpts = { cc: args.cc, bcc: args.bcc, isHtml: args.isHtml, replyToMessageId: args.replyToMessageId };
 
       try {
-        const result = await gmailClient.trashMessages(mcpUserId, args.messageIds, args.threadIds, args.email);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-      } catch (error) {
-        return formatError(error);
-      }
-    }
-  );
+        let result: unknown;
 
-  // Register gmail.untrashMessages tool
-  server.registerTool(
-    'gmail.untrashMessages',
-    {
-      description: 'Move messages or threads out of Trash. Requires gmail.modify scope.',
-      inputSchema: {
-        messageIds: z.array(z.string()).optional().describe('Message IDs to untrash'),
-        threadIds: z.array(z.string()).optional().describe('Thread IDs to untrash'),
-        email: emailSchema,
-      },
-    },
-    async (args, extra) => {
-      const mcpUserId = getMcpUserId(extra);
+        switch (args.action) {
+          case 'create':
+            if (!args.to || !args.subject || !args.body) {
+              return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'to, subject, and body are required for action=create', code: -32602 }) }], isError: true as const };
+            }
+            result = await gmailClient.createDraft(mcpUserId, args.to, args.subject, args.body, composeOpts, args.email);
+            break;
+          case 'get':
+            if (!args.draftId) {
+              return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'draftId is required for action=get', code: -32602 }) }], isError: true as const };
+            }
+            result = await gmailClient.getDraft(mcpUserId, args.draftId, args.email);
+            break;
+          case 'update':
+            if (!args.draftId || !args.to || !args.subject || !args.body) {
+              return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'draftId, to, subject, and body are required for action=update', code: -32602 }) }], isError: true as const };
+            }
+            result = await gmailClient.updateDraft(mcpUserId, args.draftId, args.to, args.subject, args.body, composeOpts, args.email);
+            break;
+          case 'delete':
+            if (!args.draftId) {
+              return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'draftId is required for action=delete', code: -32602 }) }], isError: true as const };
+            }
+            result = await gmailClient.deleteDraft(mcpUserId, args.draftId, args.email);
+            break;
+          case 'send':
+            if (!args.draftId) {
+              return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'draftId is required for action=send', code: -32602 }) }], isError: true as const };
+            }
+            result = await gmailClient.sendDraft(mcpUserId, args.draftId, args.email);
+            break;
+          case 'list':
+            result = await gmailClient.listDrafts(mcpUserId, args.maxResults ?? 20, args.pageToken, args.email);
+            break;
+        }
 
-      try {
-        const result = await gmailClient.untrashMessages(mcpUserId, args.messageIds, args.threadIds, args.email);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-      } catch (error) {
-        return formatError(error);
-      }
-    }
-  );
-
-  // Register gmail.sendDraft tool
-  server.registerTool(
-    'gmail.sendDraft',
-    {
-      description: 'Send an existing draft. Removes the draft from drafts and delivers it. Requires gmail.compose scope.',
-      inputSchema: {
-        draftId: z.string().describe('The draft ID to send'),
-        email: emailSchema,
-      },
-    },
-    async (args, extra) => {
-      const mcpUserId = getMcpUserId(extra);
-
-      try {
-        const result = await gmailClient.sendDraft(mcpUserId, args.draftId, args.email);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-      } catch (error) {
-        return formatError(error);
-      }
-    }
-  );
-
-  // Register gmail.createDraft tool
-  server.registerTool(
-    'gmail.createDraft',
-    {
-      description: 'Create a new draft email. Requires gmail.compose scope.',
-      inputSchema: {
-        to: z.union([z.string(), z.array(z.string())]).describe('Recipient email address(es)'),
-        subject: z.string().describe('Email subject'),
-        body: z.string().describe('Email body content'),
-        cc: z.union([z.string(), z.array(z.string())]).optional().describe('CC recipient(s)'),
-        bcc: z.union([z.string(), z.array(z.string())]).optional().describe('BCC recipient(s)'),
-        isHtml: z.boolean().optional().describe('Whether body is HTML (default: false, plain text)'),
-        replyToMessageId: z.string().optional().describe('Message ID to reply to. When provided, the draft will be threaded as a reply with proper In-Reply-To and References headers.'),
-        email: emailSchema,
-      },
-    },
-    async (args, extra) => {
-      const mcpUserId = getMcpUserId(extra);
-
-      try {
-        const result = await gmailClient.createDraft(mcpUserId, args.to, args.subject, args.body, {
-          cc: args.cc,
-          bcc: args.bcc,
-          isHtml: args.isHtml,
-          replyToMessageId: args.replyToMessageId,
-        }, args.email);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-      } catch (error) {
-        return formatError(error);
-      }
-    }
-  );
-
-  // Register gmail.listDrafts tool
-  server.registerTool(
-    'gmail.listDrafts',
-    {
-      description: 'List all draft emails',
-      inputSchema: {
-        maxResults: z.number().int().min(1).max(100).optional().describe('Maximum results (1-100, default 20)'),
-        pageToken: z.string().optional().describe('Token for pagination'),
-        email: emailSchema,
-      },
-    },
-    async (args, extra) => {
-      const mcpUserId = getMcpUserId(extra);
-
-      try {
-        const result = await gmailClient.listDrafts(mcpUserId, args.maxResults ?? 20, args.pageToken, args.email);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-      } catch (error) {
-        return formatError(error);
-      }
-    }
-  );
-
-  // Register gmail.getDraft tool
-  server.registerTool(
-    'gmail.getDraft',
-    {
-      description: 'Get a draft with full content',
-      inputSchema: {
-        draftId: z.string().describe('The draft ID'),
-        email: emailSchema,
-      },
-    },
-    async (args, extra) => {
-      const mcpUserId = getMcpUserId(extra);
-
-      try {
-        const result = await gmailClient.getDraft(mcpUserId, args.draftId, args.email);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-      } catch (error) {
-        return formatError(error);
-      }
-    }
-  );
-
-  // Register gmail.updateDraft tool
-  server.registerTool(
-    'gmail.updateDraft',
-    {
-      description: 'Update an existing draft. Requires gmail.compose scope.',
-      inputSchema: {
-        draftId: z.string().describe('The draft ID to update'),
-        to: z.union([z.string(), z.array(z.string())]).describe('Recipient email address(es)'),
-        subject: z.string().describe('Email subject'),
-        body: z.string().describe('Email body content'),
-        cc: z.union([z.string(), z.array(z.string())]).optional().describe('CC recipient(s)'),
-        bcc: z.union([z.string(), z.array(z.string())]).optional().describe('BCC recipient(s)'),
-        isHtml: z.boolean().optional().describe('Whether body is HTML (default: false, plain text)'),
-        replyToMessageId: z.string().optional().describe('Message ID to reply to. When provided, the draft will be threaded as a reply with proper In-Reply-To and References headers.'),
-        email: emailSchema,
-      },
-    },
-    async (args, extra) => {
-      const mcpUserId = getMcpUserId(extra);
-
-      try {
-        const result = await gmailClient.updateDraft(mcpUserId, args.draftId, args.to, args.subject, args.body, {
-          cc: args.cc,
-          bcc: args.bcc,
-          isHtml: args.isHtml,
-          replyToMessageId: args.replyToMessageId,
-        }, args.email);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-      } catch (error) {
-        return formatError(error);
-      }
-    }
-  );
-
-  // Register gmail.deleteDraft tool
-  server.registerTool(
-    'gmail.deleteDraft',
-    {
-      description: 'Delete a draft. Requires gmail.compose scope.',
-      inputSchema: {
-        draftId: z.string().describe('The draft ID to delete'),
-        email: emailSchema,
-      },
-    },
-    async (args, extra) => {
-      const mcpUserId = getMcpUserId(extra);
-
-      try {
-        const result = await gmailClient.deleteDraft(mcpUserId, args.draftId, args.email);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return formatError(error);
